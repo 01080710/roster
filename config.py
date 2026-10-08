@@ -54,17 +54,19 @@ DAY_PORTIONS = ["FD", "H1", "H2", "QT", "PT"]
 TEAMS = ["AO", "DW", "AO_DW"]
 DAY_TYPES = ["Work Day", "Rest Day", "PH"]
 APPROVAL_STATUSES = ["Approved", "Pending", "Rejected"]
+LEAVE_REQUEST_STATUSES = {"Pending": "待審核", "Approved": "已核准", "Rejected": "已駁回", "Cancelled": "已取消"}
 
 # 年度總覽的狀態分類與圖例（順序即圖例順序）
 SITUATION_LABELS = [("SHIFT", "上班"), ("LEAVE", "請假"), ("OT", "加班"),
-                    ("OFF", "休息 / 國定假日"), ("ACTIVITY", "公務活動")]
+                    ("OFF", "休息 / 國定假日"), ("ACTIVITY", "公務活動"), ("PENDING", "請假（待審核）")]
 
 # =====================================================================
 # 帳號與權限
 # =====================================================================
-PERMISSIONS = ["USER_VIEW", "USER_CREATE", "USER_EDIT", "USER_DELETE"]
+# LEAVE_APPLY：申請 / 撤回自己的請假；LEAVE_APPROVE：審核請假（由申請人的主管 parent_id 審核）
+PERMISSIONS = ["USER_VIEW", "USER_CREATE", "USER_EDIT", "USER_DELETE", "LEAVE_APPLY", "LEAVE_APPROVE"]
 AGENT_ROLE = "Agent"
-AGENT_PERMISSIONS = ["USER_VIEW", "USER_CREATE"]     # Agent 預設權限；其他角色預設 PERMISSIONS 全部
+AGENT_PERMISSIONS = ["USER_VIEW", "USER_CREATE", "LEAVE_APPLY"]   # Agent 預設權限；其他角色預設 PERMISSIONS 全部
 PASSWORD_MIN_LENGTH = 8
 
 
@@ -91,9 +93,19 @@ JWT_COOKIE_SECURE = _env_bool("ROSTER_COOKIE_SECURE", False)            # 環境
 JWT_COOKIE_SAMESITE = "Lax"
 
 # =====================================================================
+# 備份：啟動時一次 + 每天 BACKUP_HOUR 點一次，複製成 backups/roster_YYYYMMDD_HHMMSS.db
+# 同一天只留最新一份，最多保留最近 BACKUP_KEEP_DAYS 天，舊的自動刪除
+# =====================================================================
+BACKUP_ENABLED = _env_bool("ROSTER_BACKUP", True)                                     # 環境變數
+BACKUP_DIR = os.environ.get("ROSTER_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))   # 環境變數
+BACKUP_HOUR = 3              # 每日自動備份時間（伺服器當地時間，0–23）
+BACKUP_KEEP_DAYS = 14        # 保留幾天份
+
+# =====================================================================
 # 介面
 # =====================================================================
 RECENT_ROSTER_LIMIT = 50     # 「查詢與修改」最多顯示筆數
+LEAVE_REQUEST_LIMIT = 50     # 請假頁每個列表最多顯示筆數
 PIVOT_YEARS_BEFORE = 2       # 年度總覽的年份選單：今年往前幾年
 PIVOT_YEARS_AFTER = 2        # 年度總覽的年份選單：今年往後幾年
 
@@ -110,7 +122,7 @@ DIM_TABLES = {
         "table": "dim_employee", "pk": "employee_id", "pk_mode": "auto", "label": "員工",
         "order": "office_code, full_name",
         "list_cols": ["employee_id", "full_name", "email", "office_code", "team", "role",
-                      "rest_pattern_code", "default_shift_code", "hire_date", "termination_date",
+                      "rest_pattern_code", "default_shift_code", "parent_id", "parent_name", "hire_date", "termination_date",
                       "permission", "updated_at"],
     },
     "holiday": {

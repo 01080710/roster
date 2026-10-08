@@ -2,19 +2,56 @@
 資料表定義、初始資料與 fact_roster 的讀寫（CRUD）。
 """
 
+from werkzeug.security import check_password_hash, generate_password_hash
 from zoneinfo import ZoneInfo
 import pandas as pd
 import datetime as dt
+import os
+import re
 import sqlite3
-
-from werkzeug.security import check_password_hash, generate_password_hash
-
 from config import (
-    AGENT_PERMISSIONS, AGENT_ROLE, APPROVAL_STATUSES, CATEGORY_LABEL, DAY_PORTIONS, DAY_TYPES, DB_PATH,
-    DIM_TABLES, FIELD_CHOICES, MAX_RANGE_DAYS, MIN_REST_HOURS, OFFICE_TZ, OT_FULL_DAY_HOURS,
+    AGENT_PERMISSIONS, AGENT_ROLE, APPROVAL_STATUSES, BACKUP_DIR, BACKUP_KEEP_DAYS, CATEGORY_LABEL, DAY_PORTIONS, DAY_TYPES, DB_PATH,
+    DIM_TABLES, FIELD_CHOICES, LEAVE_REQUEST_LIMIT, LEAVE_REQUEST_STATUSES, MAX_RANGE_DAYS, MIN_REST_HOURS,
+    OFFICE_TZ, OT_FULL_DAY_HOURS,
     PASSWORD_MIN_LENGTH, PERMISSIONS, RECENT_ROSTER_LIMIT, REST_PATTERN, SHIFT_TYPES, STATUS_GROUPS,
     TEAMS, WEEKDAY,
 )
+
+
+def period_range(year, month=None):
+    """整年或單月的 (第一天, 最後一天)。"""
+    if month:
+        return dt.date(year, month, 1), dt.date(year + month // 12, month % 12 + 1, 1) - dt.timedelta(days=1)
+    return dt.date(year, 1, 1), dt.date(year, 12, 31)
+
+
+def backup_db(src=DB_PATH, backup_dir=BACKUP_DIR, keep_days=BACKUP_KEEP_DAYS):
+    """用 SQLite backup API 複製一份（寫入中也不會壞檔），檔名 {原檔名}_YYYYMMDD_HHMMSS.db。
+    之後整理備份資料夾：同一天只留最新一份，只保留最近 keep_days 天。回傳 (新備份路徑, 刪除的檔名)。"""
+    os.makedirs(backup_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(src))[0]
+    path = os.path.join(backup_dir, f"{stem}_{dt.datetime.now():%Y%m%d_%H%M%S}.db")
+    source, target = sqlite3.connect(src), sqlite3.connect(path)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+    pattern = re.compile(rf"^{re.escape(stem)}_(\d{{8}})_\d{{6}}\.db$")
+    newest_per_day = {}
+    removed = []
+    for name in sorted(os.listdir(backup_dir), reverse=True):        # 新 → 舊
+        m = pattern.match(name)
+        if not m:
+            continue
+        day = m.group(1)
+        if day in newest_per_day or len(newest_per_day) >= keep_days:
+            os.remove(os.path.join(backup_dir, name))
+            removed.append(name)
+        else:
+            newest_per_day[day] = name
+    return path, removed
 
 
 def default_permissions(role):
@@ -76,7 +113,8 @@ CREATE TABLE IF NOT EXISTS dim_employee (
     contracted_weekly_hours REAL,
     hire_date               TEXT,               -- 'YYYY-MM-DD'
     termination_date        TEXT,
-    manager_id              TEXT REFERENCES dim_employee(employee_id),
+    parent_id               TEXT REFERENCES dim_employee(employee_id),   -- 主管（必填，限非 Agent）；最高主管填自己
+    parent_name             TEXT,               -- 主管姓名，由 parent_id 帶出（系統寫入）
     notes                   TEXT,
     permission              TEXT,               -- 逗號分隔，例如 'USER_VIEW,USER_CREATE'
     password_hash           TEXT,               -- werkzeug 雜湊；NULL 表示尚未設定密碼，不能登入
@@ -127,10 +165,29 @@ CREATE TABLE IF NOT EXISTS fact_roster (
     roster_version        INTEGER DEFAULT 1,
     remarks               TEXT,
     check_flag            TEXT,
+    leave_request_id      TEXT REFERENCES fact_leave_request(request_id),   -- 由請假申請核准寫入時才有值
     created_at            TEXT,
     updated_at            TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_roster_emp_date ON fact_roster (employee_id, roster_date);
+
+CREATE TABLE IF NOT EXISTS fact_leave_request (
+    request_id     TEXT PRIMARY KEY,            -- LR-{{YYYYMMDD}}-{{NNN}}
+    employee_id    TEXT NOT NULL REFERENCES dim_employee(employee_id),
+    shift_code     TEXT NOT NULL REFERENCES dim_shift_code(shift_code),   -- category = 'LEAVE' 的代碼
+    start_date     TEXT NOT NULL,               -- 'YYYY-MM-DD'
+    end_date       TEXT NOT NULL,
+    days           REAL NOT NULL,               -- 略過非工作日後的請假天數（半天 0.5）
+    reason         TEXT,
+    status         TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ({_in(LEAVE_REQUEST_STATUSES)})),
+    approver_id    TEXT REFERENCES dim_employee(employee_id),
+    decided_at     TEXT,                        -- 核准 / 駁回時間（UTC）
+    decision_note  TEXT,
+    created_at     TEXT,                        -- 送出時間（UTC）
+    updated_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_leave_emp_date ON fact_leave_request (employee_id, start_date, end_date);
+CREATE INDEX IF NOT EXISTS ix_leave_status ON fact_leave_request (status);
 """
 
 
@@ -201,20 +258,21 @@ SEED_HOLIDAYS = [
 
 # 來自原排班表；休息模式與預設班別為示範值，請改成實際資料
 SEED_EMPLOYEES = [
-    ("Omar Guerraoui", "omar.guerraoui@hytechc.com", "MA", "AO", "Agent", "S1501_FD"),
-    ("Cisse Papa Amadou", "cisse.papaamadou@hytechc.com", "MA", "AO", "Agent", "S2006_FD"),
-    ("Rami Abderrahman", "abderahman.rami@hytechc.com", "MA", "DW", "Agent", None),
+    ("Peter Chang", "peter.chang@hytechc.com", "MA", "AO", "Admin", "S1501_FD"),
+    # ("Omar Guerraoui", "omar.guerraoui@hytechc.com", "MA", "AO", "Agent", "S1501_FD"),
+    # ("Cisse Papa Amadou", "cisse.papaamadou@hytechc.com", "MA", "AO", "Agent", "S2006_FD"),
+    # ("Rami Abderrahman", "abderahman.rami@hytechc.com", "MA", "DW", "Agent", None),
     ("Laura Lim", "laura.lim@hytechc.com", "MY", "AO_DW", "AM", "S0918_FD"),
     ("Joanne Loy", "joanne.loy@hytechc.com", "MY", "AO", "Agent", "S0716_FD"),
-    ("Liyana Pertiwi", "liyana.pertiwi@hytechc.com", "MY", "AO", "Agent", "S0716_FD"),
-    ("Alex Lee", "alex.lee@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
-    ("Junquan Ko", "junquan.ko@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
-    ("Priyatharishini Saravanan", "priya.saravanan@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
-    ("Teo Sui Kee", "suikee.teo@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
-    ("Rina Tan", "rina.tan@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
-    ("Vicky Nak", "vicky.nak@hytechc.com", "MY", "AO", "Agent", "S2207_FD"),
-    ("Aileen Chiang", "aileen.chiang@hytechc.com", "MY", "AO", "Agent", "S1322_FD"),
-    ("Ummu Sarah", "ummu.sarah@hytechc.com", "MY", "AO", "Agent", "S1322_FD"),
+    # ("Liyana Pertiwi", "liyana.pertiwi@hytechc.com", "MY", "AO", "Agent", "S0716_FD"),
+    # ("Alex Lee", "alex.lee@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
+    # ("Junquan Ko", "junquan.ko@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
+    # ("Priyatharishini Saravanan", "priya.saravanan@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
+    # ("Teo Sui Kee", "suikee.teo@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
+    # ("Rina Tan", "rina.tan@hytechc.com", "MY", "AO", "Agent", "S0918_FD"),
+    # ("Vicky Nak", "vicky.nak@hytechc.com", "MY", "AO", "Agent", "S2207_FD"),
+    # ("Aileen Chiang", "aileen.chiang@hytechc.com", "MY", "AO", "Agent", "S1322_FD"),
+    # ("Ummu Sarah", "ummu.sarah@hytechc.com", "MY", "AO", "Agent", "S1322_FD"),
 ]
 
 
@@ -222,7 +280,9 @@ SEED_EMPLOYEES = [
 BOOL_FIELDS = {"is_paid", "deducts_leave_balance", "is_active", "is_substitute"}
 DATE_FIELDS = {"hire_date", "termination_date", "holiday_date"}
 TIME_FIELDS = {"start_time", "end_time"}
-FK_FIELDS = {"default_shift_code", "manager_id"}
+FK_FIELDS = {"default_shift_code", "parent_id"}
+DERIVED_FIELDS = {"parent_name"}            # 由其他欄位帶出，頁面唯讀
+REQUIRED_FIELDS = {"parent_id"}             # 資料表沒有 NOT NULL（舊資料可能是空的），但存檔時必填
 HIDDEN_FIELDS = {"password_hash"}          # 不在維度表頁面顯示；密碼另用 new_password 設定
 TIMESTAMP_FIELDS = {"created_at", "updated_at"}   # 系統自動寫入，頁面唯讀
 
@@ -282,7 +342,14 @@ class RosterDB:
     # ---------------- 初始化 ----------------
     def init_db(self):
         conn = self.conn
+        had_leave_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fact_leave_request'").fetchone()
         conn.executescript(SCHEMA)
+        emp_cols = {c["name"] for c in conn.execute("PRAGMA table_info(dim_employee)")}
+        if "manager_id" in emp_cols and "parent_id" not in emp_cols:     # 舊欄位改名
+            conn.execute("ALTER TABLE dim_employee RENAME COLUMN manager_id TO parent_id")
+        if "parent_name" not in emp_cols:
+            conn.execute("ALTER TABLE dim_employee ADD COLUMN parent_name TEXT")
         conn.executemany(
             """INSERT OR IGNORE INTO dim_shift_code
                (shift_code, roster_display, shift_name, category, status_group, shift_type, start_time, end_time,
@@ -300,16 +367,19 @@ class RosterDB:
         conn.executemany(
             """INSERT OR IGNORE INTO dim_employee
                (employee_id, full_name, email, office_code, calendar_code, team, role,
-                rest_pattern_code, default_shift_code, contract_type, contracted_weekly_hours)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            [(f"EMP{i:04d}", n, e, o, o, t, r, "SAT_SUN", s, "Full-time", 40)
+                rest_pattern_code, default_shift_code, contract_type, contracted_weekly_hours, parent_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [(f"EMP{i:04d}", n, e, o, o, t, r, "SAT_SUN", s, "Full-time", 40, "EMP0001")   # 第一位為最高主管
              for i, (n, e, o, t, r, s) in enumerate(SEED_EMPLOYEES, 1)],
         )
+        conn.execute("""UPDATE dim_employee SET parent_name =
+                        (SELECT p.full_name FROM dim_employee p WHERE p.employee_id = dim_employee.parent_id)""")
         # 舊的 roster.db 缺欄位時補上：權限、密碼、各維度表的建立 / 更新時間
         new_cols = {
             "dim_employee": ("permission", "password_hash", "created_at", "updated_at"),
             "dim_shift_code": ("created_at", "updated_at"),
             "dim_holiday": ("created_at", "updated_at"),
+            "fact_roster": ("leave_request_id",),
         }
         now = _now()
         for table, wanted in new_cols.items():
@@ -321,6 +391,14 @@ class RosterDB:
             conn.execute(f"UPDATE {table} SET created_at = COALESCE(created_at, ?), "
                          f"updated_at = COALESCE(updated_at, created_at, ?) "
                          f"WHERE created_at IS NULL OR updated_at IS NULL", (now, now))
+        if not had_leave_table:
+            # 第一次加入請假功能：既有帳號補上請假權限（Agent 只能申請，其他角色可申請與審核）
+            for emp in conn.execute("SELECT employee_id, role, permission FROM dim_employee "
+                                    "WHERE permission IS NOT NULL AND permission != ''").fetchall():
+                extra = ["LEAVE_APPLY"] if emp["role"] == AGENT_ROLE else ["LEAVE_APPLY", "LEAVE_APPROVE"]
+                perms = parse_permissions(emp["permission"].split(",") + extra)
+                conn.execute("UPDATE dim_employee SET permission = ? WHERE employee_id = ?",
+                             (",".join(perms), emp["employee_id"]))
         conn.execute(
             """UPDATE dim_employee SET permission = CASE WHEN role = 'Agent' THEN ? ELSE ? END
                WHERE permission IS NULL OR permission = ''""",
@@ -471,6 +549,7 @@ class RosterDB:
             "leave_approval_status": leave_approval_status or None,
             "remarks": remarks or None,
             "check_flag": "；".join(flags) or None,
+            "leave_request_id": None,      # 一般提交會清掉與請假申請的關聯
         }
         return row, flags
 
@@ -512,7 +591,10 @@ class RosterDB:
                     results.append({"date": _iso(d), "action": "skipped",
                                     "message": f"略過：{row['day_type']}", "row": row})
                     continue
-                if not allow_update and self.get_roster(row["roster_key"]) is not None:
+                existing = self.get_roster(row["roster_key"])
+                if existing is not None and existing["leave_request_id"]:
+                    raise ValueError(f"這天由請假單 {existing['leave_request_id']} 寫入，請到「請假」頁取消後再修改")
+                if not allow_update and existing is not None:
                     raise ValueError("當天已有排班，修改需要 USER_EDIT 權限")
                 action = self.upsert_roster(row)
                 self.conn.commit()
@@ -555,10 +637,11 @@ class RosterDB:
     def get_roster(self, roster_key):
         return self.conn.execute("SELECT * FROM fact_roster WHERE roster_key = ?", (roster_key,)).fetchone()
 
-    def roster_pivot(self, year):
-        """當年度班表樞紐：列 = (team, office_code, full_name)，欄 = roster_date，
+    def roster_pivot(self, year, month=None):
+        """當年度（或指定月份）班表樞紐：列 = (team, office_code, full_name)，欄 = roster_date，
         值 = 班別的 roster_display 與 situation（SHIFT / LEAVE / OT / OFF / ACTIVITY，標記加班一律算 OT）。
         full_name 依 employee_id 從 dim_employee 帶出。回傳 (pivot, totals)，totals 為每人上班 / 請假 / 加班天數。"""
+        start, end = period_range(year, month)
         roster = pd.read_sql_query(
             """SELECT r.team, r.office_code, COALESCE(e.full_name, r.employee_id) AS full_name,
                       r.roster_date, r.employee_id,
@@ -570,11 +653,15 @@ class RosterDB:
                LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
                WHERE r.roster_date BETWEEN ? AND ?
                ORDER BY r.roster_date, r.employee_id""",
-            self.conn, params=(f"{year}-01-01", f"{year}-12-31"),
+            self.conn, params=(start.isoformat(), end.isoformat()),
         )
+        pending = self._pending_leave_frame(start.isoformat(), end.isoformat())
+        if not pending.empty:
+            # 待審核的假疊在原本班別上（pivot 取 last），天數算 0，不影響小計
+            roster = pd.concat([roster, pending], ignore_index=True).sort_values("roster_date", kind="stable")
         if roster.empty:
             return pd.DataFrame(), pd.DataFrame()
-        index = ["team", "office_code", "full_name"]
+        index = ["team", "office_code", "full_name", "employee_id"]   # employee_id 供點擊明細使用，不顯示
         roster[["team", "office_code"]] = roster[["team", "office_code"]].fillna("—")
         pivot = roster.pivot_table(
             index=index,
@@ -584,6 +671,308 @@ class RosterDB:
         )
         totals = roster.groupby(index)[["work_fraction", "leave_fraction", "ot_fraction"]].sum()
         return pivot, totals
+
+    def _pending_leave_frame(self, start, end):
+        """與 start ~ end 重疊的待審核請假，展開成每天一列（situation = PENDING）。"""
+        rows = []
+        for q in self.conn.execute(
+                """SELECT q.*, e.full_name, s.roster_display FROM fact_leave_request q
+                   JOIN dim_employee e ON e.employee_id = q.employee_id
+                   JOIN dim_shift_code s ON s.shift_code = q.shift_code
+                   WHERE q.status = 'Pending' AND q.start_date <= ? AND q.end_date >= ?""", (end, start)):
+            try:
+                planned, _ = self.plan_leave(q["employee_id"], q["shift_code"],
+                                             dt.date.fromisoformat(q["start_date"]), dt.date.fromisoformat(q["end_date"]))
+            except ValueError:
+                continue
+            rows += [{"team": r["team"], "office_code": r["office_code"], "full_name": q["full_name"],
+                      "roster_date": r["roster_date"], "employee_id": q["employee_id"],
+                      "roster_display": q["roster_display"], "situation": "PENDING",
+                      "shift_code": q["shift_code"], "request_id": q["request_id"],
+                      "work_fraction": 0, "leave_fraction": 0, "ot_fraction": 0}
+                     for r in planned if start <= r["roster_date"] <= end]
+        return pd.DataFrame(rows)
+
+    DETAIL_FRACTION = {"work": "work_fraction", "leave": "leave_fraction", "ot": "ot_fraction"}
+
+    def roster_detail(self, kind, year, month=None, employee_id=None):
+        """總覽「上班 / 請假 / 加班」的逐日明細：該項天數 > 0 的每一天。
+        請假另外附上待審核的日子（天數記 0，不計入小計）。"""
+        col = self.DETAIL_FRACTION[kind]
+        start, end = (d.isoformat() for d in period_range(year, month))
+        sql = f"""SELECT r.*, COALESCE(e.full_name, r.full_name) AS name, s.roster_display, r.{col} AS days
+                  FROM fact_roster r
+                  LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
+                  LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
+                  WHERE r.roster_date BETWEEN ? AND ? AND r.{col} > 0"""
+        args = [start, end]
+        if employee_id:
+            sql += " AND r.employee_id = ?"
+            args.append(employee_id)
+        rows = [dict(r, pending=False) for r in self.conn.execute(sql, args)]
+        if kind == "leave":
+            pending = self._pending_leave_frame(start, end)
+            for p in pending.to_dict("records") if not pending.empty else []:
+                if employee_id and p["employee_id"] != employee_id:
+                    continue
+                d = dt.date.fromisoformat(p["roster_date"])
+                rows.append({"roster_date": p["roster_date"], "weekday": WEEKDAY[d.isoweekday() - 1],
+                             "employee_id": p["employee_id"], "name": p["full_name"], "team": p["team"],
+                             "shift_code": p["shift_code"], "roster_display": p["roster_display"],
+                             "day_type": "Work Day", "holiday_name": None, "planned_start_local": None,
+                             "planned_end_local": None, "planned_hours": None, "days": 0, "is_ot": 0,
+                             "leave_approval_status": None, "leave_request_id": p["request_id"],
+                             "remarks": None, "check_flag": None, "pending": True})
+        return sorted(rows, key=lambda r: (r["roster_date"], r["employee_id"]))
+
+    def leave_calendar(self, year, month):
+        """請假月曆：{日期: [{name, team, display, pending}]}，含已核准（班表上的請假）與待審核。"""
+        start, end = (d.isoformat() for d in period_range(year, month))
+        days = {}
+        for r in self.conn.execute(
+                """SELECT r.roster_date, r.employee_id, COALESCE(e.full_name, r.full_name) AS name, r.team,
+                          COALESCE(s.roster_display, r.shift_code) AS display
+                   FROM fact_roster r
+                   LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
+                   LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
+                   WHERE r.status_group = 'Leave' AND r.roster_date BETWEEN ? AND ?
+                   ORDER BY r.roster_date, r.team, name""", (start, end)):
+            days.setdefault(r["roster_date"], []).append(
+                {"name": r["name"], "team": r["team"], "display": r["display"], "pending": False})
+        pending = self._pending_leave_frame(start, end)
+        for p in pending.to_dict("records") if not pending.empty else []:
+            days.setdefault(p["roster_date"], []).append(
+                {"name": p["full_name"], "team": p["team"], "display": p["roster_display"], "pending": True})
+        return days
+
+    # ---------------- 請假申請 ----------------
+    def get_shift(self, shift_code):
+        return self.conn.execute("SELECT * FROM dim_shift_code WHERE shift_code = ?", (shift_code,)).fetchone()
+
+    def leave_shift_groups(self):
+        """請假表單用：有效的 LEAVE 代碼，依 leave_type 分組。"""
+        groups = {}
+        for s in self.conn.execute("SELECT * FROM dim_shift_code WHERE is_active = 1 AND category = 'LEAVE' "
+                                   "ORDER BY sort_order"):
+            groups.setdefault(s["leave_type"] or s["shift_code"], []).append(s)
+        return list(groups.items())
+
+    def plan_leave(self, employee_id, shift_code, start_date, end_date):
+        """請假會寫進班表的日子（略過休息日與國定假日）。回傳 (rows, days)；不合法時丟出 ValueError。"""
+        sh = self.get_shift(shift_code)
+        if sh is None or sh["category"] != "LEAVE":
+            raise ValueError("請選擇請假假別")
+        if end_date < start_date:
+            raise ValueError("結束日期不可早於開始日期")
+        span = (end_date - start_date).days + 1
+        if span > MAX_RANGE_DAYS:
+            raise ValueError(f"一次最多申請 {MAX_RANGE_DAYS} 天")
+        if sh["day_portion"] != "FD" and span > 1:
+            raise ValueError(f"{shift_code} 不是全天假，只能申請單日")
+        rows = []
+        for i in range(span):
+            row, _ = self.build_roster_row(employee_id, shift_code, start_date + dt.timedelta(days=i),
+                                           leave_approval_status="Approved")
+            if row["day_type"] == "Work Day":
+                rows.append(row)
+        if not rows:
+            raise ValueError("區間內沒有工作日，不需要請假")
+        dates = [r["roster_date"] for r in rows]
+        hit = self.conn.execute(
+            f"""SELECT roster_date FROM fact_roster WHERE employee_id = ? AND status_group = 'Leave'
+                AND roster_date IN ({", ".join("?" * len(dates))}) ORDER BY roster_date""",
+            [employee_id] + dates).fetchone()
+        if hit:
+            raise ValueError(f"{hit['roster_date']} 班表上已經是請假")
+        return rows, sum(r["leave_fraction"] for r in rows)
+
+    def leave_overlap(self, employee_id, start, end, exclude=None):
+        """同一人與 start ~ end 重疊、仍有效（待審核 / 已核准）的申請單號，沒有時回傳 None。"""
+        hit = self.conn.execute(
+            """SELECT request_id FROM fact_leave_request
+               WHERE employee_id = ? AND status IN ('Pending', 'Approved') AND start_date <= ? AND end_date >= ?
+                 AND request_id != ?""",
+            (employee_id, _iso(end), _iso(start), exclude or "")).fetchone()
+        return hit["request_id"] if hit else None
+
+    def _next_request_id(self):
+        prefix = f"LR-{dt.date.today():%Y%m%d}-"
+        nums = [int(r[0][len(prefix):]) for r in self.conn.execute(
+            "SELECT request_id FROM fact_leave_request WHERE request_id LIKE ?", (prefix + "%",))]
+        return f"{prefix}{max(nums, default=0) + 1:03d}"
+
+    def create_leave_request(self, employee_id, shift_code, start_date, end_date, reason=None):
+        """送出請假申請（Pending），回傳 request_id。"""
+        emp = self.get_employee(employee_id)
+        if emp is not None and not emp["parent_id"]:
+            raise ValueError("尚未設定主管，無法送出請假申請，請聯絡管理員")
+        if emp is not None and not self.leave_approvers(employee_id):
+            if emp["parent_id"] != employee_id:
+                raise ValueError(f"主管 {emp['parent_id']} {emp['parent_name'] or ''} 目前無法登入審核"
+                                 "（未設定密碼、已離職或沒有 LEAVE_APPROVE），請聯絡管理員")
+            raise ValueError("你是最高主管，需要另一位已開通帳號、有 LEAVE_APPROVE 權限的人才能審核你的請假")
+        _, days = self.plan_leave(employee_id, shift_code, start_date, end_date)
+        hit = self.leave_overlap(employee_id, start_date, end_date)
+        if hit:
+            raise ValueError(f"日期與申請單 {hit} 重疊")
+        rid, now = self._next_request_id(), _now()
+        try:
+            self.conn.execute(
+                """INSERT INTO fact_leave_request
+                   (request_id, employee_id, shift_code, start_date, end_date, days, reason, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,'Pending',?,?)""",
+                (rid, employee_id, shift_code, _iso(start_date), _iso(end_date), days, reason or None, now, now))
+            self.conn.commit()
+        except sqlite3.IntegrityError:      # 兩人同時送出拿到同一個單號
+            self.conn.rollback()
+            raise ValueError("送出時發生衝突，請再送一次") from None
+        return rid
+
+    def get_leave_request(self, request_id):
+        return self.conn.execute("SELECT * FROM fact_leave_request WHERE request_id = ?", (request_id,)).fetchone()
+
+    def leave_approvers(self, employee_id):
+        """目前能審核此員工請假的人：能登入、有 LEAVE_APPROVE、不是本人；
+        有主管時只有主管，最高主管（或舊資料沒有主管）時是其他所有符合條件的人。"""
+        emp = self.get_employee(employee_id)
+        rows = self.conn.execute("SELECT * FROM dim_employee WHERE employee_id != ? ORDER BY employee_id",
+                                 (employee_id,)).fetchall()
+        if emp["parent_id"] and emp["parent_id"] != employee_id:
+            rows = [r for r in rows if r["employee_id"] == emp["parent_id"]]
+        return [r for r in rows if self.can_login(r) and "LEAVE_APPROVE" in parse_permissions(r["permission"])]
+
+    def _check_approver(self, req, approver_id):
+        """不能審自己的假；由申請人的主管（parent_id）審核。
+        最高主管（parent_id 是自己）或舊資料沒有主管時，其他有 LEAVE_APPROVE 的人都能審。"""
+        if req["employee_id"] == approver_id:
+            raise ValueError("不能審核自己的請假申請")
+        emp = self.get_employee(req["employee_id"])
+        if emp["parent_id"] and emp["parent_id"] not in (emp["employee_id"], approver_id):
+            raise ValueError(f"此申請應由主管 {emp['parent_id']} {emp['parent_name'] or ''} 審核")
+
+    def _set_request_status(self, request_id, from_status, sets, args):
+        """只在狀態仍是 from_status 時更新，避免兩人同時審核同一張申請。"""
+        cur = self.conn.execute(f"UPDATE fact_leave_request SET {sets} WHERE request_id = ? AND status = ?",
+                                list(args) + [request_id, from_status])
+        if cur.rowcount != 1:
+            raise ValueError(f"申請單 {request_id} 狀態已被其他人變更，請重新整理")
+
+    def _request_in(self, request_id, *statuses):
+        req = self.get_leave_request(request_id)
+        if req is None:
+            raise ValueError(f"找不到申請單 {request_id}")
+        if req["status"] not in statuses:
+            raise ValueError(f"申請單 {request_id} 目前為{LEAVE_REQUEST_STATUSES[req['status']]}，無法執行")
+        return req
+
+    def approve_leave_request(self, request_id, approver_id, note=None):
+        """核准並寫入班表（同一個交易；任何一天失敗就整筆回滾）。回傳寫入天數。"""
+        req = self._request_in(request_id, "Pending")
+        self._check_approver(req, approver_id)
+        try:
+            rows, days = self.plan_leave(req["employee_id"], req["shift_code"],
+                                         dt.date.fromisoformat(req["start_date"]), dt.date.fromisoformat(req["end_date"]))
+            remarks = f"{request_id}：{req['reason']}" if req["reason"] else request_id
+            for row in rows:
+                row.update(leave_request_id=request_id, remarks=remarks)
+                self.upsert_roster(row)
+            now = _now()
+            self._set_request_status(
+                request_id, "Pending",
+                "status = 'Approved', days = ?, approver_id = ?, decided_at = ?, decision_note = ?, updated_at = ?",
+                (days, approver_id, now, note or None, now))
+            self.conn.commit()
+        except (ValueError, sqlite3.Error):
+            self.conn.rollback()
+            raise
+        return len(rows)
+
+    def reject_leave_request(self, request_id, approver_id, note=None):
+        req = self._request_in(request_id, "Pending")
+        self._check_approver(req, approver_id)
+        now = _now()
+        self._set_request_status(request_id, "Pending",
+                                 "status = 'Rejected', approver_id = ?, decided_at = ?, decision_note = ?, updated_at = ?",
+                                 (approver_id, now, note or None, now))
+        self.conn.commit()
+
+    def cancel_leave_request(self, request_id, actor_id, as_approver=False, note=None):
+        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消，
+        並把該申請寫入的班表還原為預設班別（沒有預設班別時刪除該天）。回傳還原天數。"""
+        req = self._request_in(request_id, "Pending", "Approved")
+        own_pending = req["status"] == "Pending" and req["employee_id"] == actor_id
+        if not own_pending:
+            if not as_approver:
+                raise ValueError("已核准的請假需由主管取消" if req["status"] == "Approved" else "只能撤回自己的申請")
+            self._check_approver(req, actor_id)
+        default = self.get_employee(req["employee_id"])["default_shift_code"]
+        restored = 0
+        try:
+            for r in self.conn.execute("SELECT roster_key, roster_date FROM fact_roster WHERE leave_request_id = ?",
+                                       (request_id,)).fetchall():
+                try:
+                    if not default:
+                        raise ValueError("沒有預設班別")
+                    row, _ = self.build_roster_row(req["employee_id"], default, dt.date.fromisoformat(r["roster_date"]),
+                                                   remarks=f"{request_id} 已取消，還原預設班別")
+                    self.upsert_roster(row)
+                except ValueError:
+                    self.conn.execute("DELETE FROM fact_roster WHERE roster_key = ?", (r["roster_key"],))
+                restored += 1
+            who = "申請人撤回" if own_pending else f"{actor_id} 取消"
+            self._set_request_status(request_id, req["status"], "status = 'Cancelled', decision_note = ?, updated_at = ?",
+                                     (f"{who}：{note}" if note else who, _now()))
+            self.conn.commit()
+        except (ValueError, sqlite3.Error):
+            self.conn.rollback()
+            raise
+        return restored
+
+    _LEAVE_SELECT = """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display,
+                              a.full_name AS approver_name
+                       FROM fact_leave_request q
+                       JOIN dim_employee e ON e.employee_id = q.employee_id
+                       LEFT JOIN dim_shift_code s ON s.shift_code = q.shift_code
+                       LEFT JOIN dim_employee a ON a.employee_id = q.approver_id"""
+
+    def leave_requests(self, employee_id=None, approver_id=None, statuses=None, limit=LEAVE_REQUEST_LIMIT):
+        """employee_id：某人自己的申請；approver_id：這個人可以審核的申請（排除自己的）。"""
+        where, args = [], []
+        if employee_id:
+            where.append("q.employee_id = ?")
+            args.append(employee_id)
+        if approver_id:
+            where.append("q.employee_id != ? AND (e.parent_id IS NULL OR e.parent_id = e.employee_id OR e.parent_id = ?)")
+            args += [approver_id, approver_id]
+        if statuses:
+            where.append(f"q.status IN ({_in(statuses)})")
+        sql = self._LEAVE_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+        return self.conn.execute(sql + " ORDER BY q.created_at DESC, q.request_id DESC LIMIT ?", args + [limit]).fetchall()
+
+    def pending_for_approver(self, approver_id):
+        """待審核清單，另帶同 team 其他人在同期間已核准 / 待審核的請假人數，方便判斷人力。"""
+        out = []
+        for q in self.leave_requests(approver_id=approver_id, statuses=["Pending"]):
+            d = dict(q)
+            d["team_off"] = self.conn.execute(
+                """SELECT COUNT(DISTINCT employee_id) FROM fact_roster
+                   WHERE team IS ? AND employee_id != ? AND status_group = 'Leave' AND roster_date BETWEEN ? AND ?""",
+                (q["team"], q["employee_id"], q["start_date"], q["end_date"])).fetchone()[0]
+            d["team_pending"] = self.conn.execute(
+                """SELECT COUNT(DISTINCT q.employee_id) FROM fact_leave_request q
+                   JOIN dim_employee e ON e.employee_id = q.employee_id
+                   WHERE e.team IS ? AND q.employee_id != ? AND q.status = 'Pending'
+                     AND q.start_date <= ? AND q.end_date >= ?""",
+                (q["team"], q["employee_id"], q["end_date"], q["start_date"])).fetchone()[0]
+            out.append(d)
+        return out
+
+    def pending_leave_count(self, approver_id):
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM fact_leave_request q JOIN dim_employee e ON e.employee_id = q.employee_id
+               WHERE q.status = 'Pending' AND q.employee_id != ?
+                 AND (e.parent_id IS NULL OR e.parent_id = e.employee_id OR e.parent_id = ?)""",
+            (approver_id, approver_id)).fetchone()[0]
 
     # ---------------- 維度表 ----------------
     @staticmethod
@@ -597,8 +986,12 @@ class RosterDB:
             rows = self.conn.execute(
                 "SELECT shift_code, roster_display FROM dim_shift_code ORDER BY sort_order").fetchall()
             return [(r["shift_code"], f"{r['shift_code']} · {r['roster_display']}") for r in rows]
-        rows = self.conn.execute("SELECT employee_id, full_name FROM dim_employee ORDER BY employee_id").fetchall()
-        return [(r["employee_id"], f"{r['employee_id']} · {r['full_name']}") for r in rows]
+        # 主管選單：在職、非 Agent
+        rows = self.conn.execute(
+            """SELECT employee_id, full_name, role FROM dim_employee
+               WHERE COALESCE(role, '') != ? AND (termination_date IS NULL OR termination_date >= date('now'))
+               ORDER BY employee_id""", (AGENT_ROLE,)).fetchall()
+        return [(r["employee_id"], f"{r['employee_id']} · {r['full_name']} ({r['role'] or '—'})") for r in rows]
 
     def dim_fields(self, kind):
         """回傳欄位清單：name、type（text/number/date/time/bool/select/perms）、options、required、pk、default、sql_type。"""
@@ -611,6 +1004,8 @@ class RosterDB:
             options = None
             if name in TIMESTAMP_FIELDS:
                 ftype = "readonly"
+            elif name in DERIVED_FIELDS:
+                ftype = "derived"
             elif name == "permission":
                 ftype, options = "perms", PERMISSIONS
             elif name in BOOL_FIELDS:
@@ -629,7 +1024,7 @@ class RosterDB:
                 ftype = "text"
             fields.append({
                 "name": name, "type": ftype, "options": options, "sql_type": sql_type,
-                "required": bool(c["notnull"] or c["pk"]), "pk": bool(c["pk"]),
+                "required": bool(c["notnull"] or c["pk"]) or name in REQUIRED_FIELDS, "pk": bool(c["pk"]),
                 "default": _sql_default(c["dflt_value"]),
             })
         return fields
@@ -660,7 +1055,7 @@ class RosterDB:
         values = {}
         for f in self.dim_fields(kind):
             raw = data.get(f["name"])
-            if f["type"] == "readonly":     # created_at / updated_at 不接受表單輸入
+            if f["type"] in ("readonly", "derived"):     # 系統寫入的欄位不接受表單輸入
                 continue
             if f["type"] == "perms":
                 raw = data.getlist(f["name"]) if hasattr(data, "getlist") else raw
@@ -698,6 +1093,8 @@ class RosterDB:
             if len(new_password) < PASSWORD_MIN_LENGTH:
                 raise ValueError(f"密碼至少 {PASSWORD_MIN_LENGTH} 個字元")
             values["password_hash"] = generate_password_hash(new_password)
+        if kind == "employee":
+            self._check_parent(values, original_key)
 
         # 時間戳記由系統寫入：新增時兩個都設，修改時只更新 updated_at（created_at 不動）
         values["updated_at"] = _now()
@@ -711,6 +1108,9 @@ class RosterDB:
                 sets = ", ".join(f"{c} = ?" for c in values)
                 self.conn.execute(f"UPDATE {table} SET {sets} WHERE {pk} = ?",
                                   list(values.values()) + [original_key])
+                if kind == "employee":     # 改名時同步下屬的 parent_name
+                    self.conn.execute("UPDATE dim_employee SET parent_name = ? WHERE parent_id = ?",
+                                      (values["full_name"], original_key))
                 action = "updated"
             else:
                 if self.dim_get(kind, values[pk]) is not None:
@@ -724,6 +1124,51 @@ class RosterDB:
             self.conn.rollback()
             raise ValueError(f"資料不符合限制：{e}") from None
         return values[pk], action
+
+    @staticmethod
+    def _manager_problem(role, termination_date, permission):
+        """不能當主管的原因；可以時回傳 None。"""
+        if role == AGENT_ROLE:
+            return "是 Agent"
+        if termination_date and termination_date < dt.date.today().isoformat():
+            return "已離職"
+        if "LEAVE_APPROVE" not in parse_permissions(permission):
+            return "沒有 LEAVE_APPROVE 權限"
+        return None
+
+    def _check_parent(self, values, original_key):
+        """員工必須有主管：非 Agent、在職、有 LEAVE_APPROVE，且不能形成循環；最高主管填自己。
+        若此員工本身是別人的主管，修改後仍須符合主管資格。驗證通過後寫入 parent_name。"""
+        emp_id, parent_id = values["employee_id"], values.get("parent_id")
+        if not parent_id:
+            raise ValueError("必須指定主管（parent_id）；最高主管請選自己")
+        if parent_id == emp_id:
+            problem = self._manager_problem(values.get("role"), values.get("termination_date"), values.get("permission"))
+            if problem:
+                raise ValueError(f"只有最高主管能選自己當主管，而此員工{problem}")
+            values["parent_name"] = values["full_name"]
+        else:
+            parent = self.get_employee(parent_id)
+            if parent is None:
+                raise ValueError(f"找不到主管 {parent_id}")
+            problem = self._manager_problem(parent["role"], parent["termination_date"], parent["permission"])
+            if problem:
+                raise ValueError(f"{parent_id} {parent['full_name']} {problem}，不能當主管")
+            seen, cur = {emp_id}, parent       # 往上找，不能繞回自己
+            while cur is not None and cur["parent_id"] and cur["parent_id"] != cur["employee_id"]:
+                seen.add(cur["employee_id"])
+                if cur["parent_id"] in seen:
+                    raise ValueError("主管關係不能形成循環")
+                cur = self.get_employee(cur["parent_id"])
+            values["parent_name"] = parent["full_name"]
+        if original_key:
+            n = self.conn.execute(
+                """SELECT COUNT(*) FROM dim_employee WHERE parent_id = ? AND employee_id != ?
+                   AND (termination_date IS NULL OR termination_date >= date('now'))""",
+                (original_key, original_key)).fetchone()[0]
+            problem = n and self._manager_problem(values.get("role"), values.get("termination_date"), values.get("permission"))
+            if problem:
+                raise ValueError(f"{original_key} 仍是 {n} 位在職員工的主管，修改後會{problem}；請先把下屬改到其他主管")
 
     def dim_delete(self, kind, key):
         meta = self._meta(kind)
