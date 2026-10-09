@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}加班 · Vantage Roster Situation{% endblock %}
+{% macro status_tag(st) %}<span class="tag st-{{ st }}">{{ leave_status_labels[st] }}</span>{% endmacro %}
+{% macro period(q) %}{{ q.start_date }}{% if q.end_date != q.start_date %} → {{ q.end_date }}{% endif %}{% endmacro %}
+{% macro how(q) %}{% if q.shift_code %}{{ q.shift_code }} · {{ q.roster_display }}{% else %}{{ q.start_time }} → {{ q.end_time }}{% endif %}{% endmacro %}
+{% macro amount(q) %}{{ q.days|days }} 天{% if q.hours %}<div class="hint">{{ q.hours|days }} 小時</div>{% endif %}{% endmacro %}
+{% block content %}
+  <h1>加班</h1>
+  <p class="sub">送出申請後由主管審核，核准後才寫入加班紀錄；加班和班表分開存，不會覆蓋當天的班。待審核的加班會在排班總覽以虛線框顯示，不計入加班天數。</p>
+  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+
+  {% if can('OT_APPROVE') %}
+  <div class="card">
+    <h2>待審核（{{ pending|length }}）</h2>
+    <p class="hint">列出主管欄位（parent_id）是你的員工送出的申請；最高主管的申請由其他有審核權限的人審。你自己的申請由你的主管審核，不會出現在這裡。</p>
+    {% if pending %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>原因</th><th>審核</th></tr>
+      {% for q in pending %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }} · {{ q.office_code }} / {{ q.team or '—' }}</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>
+          <form class="inline" method="post" action="{{ url_for('overtime.overtime_decide', request_id=q.request_id) }}">
+            <input type="text" name="decision_note" placeholder="審核意見（選填）">
+            <button name="decision" value="approve">核准</button>
+            <button name="decision" value="reject" class="danger">駁回</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">目前沒有待審核的申請。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can('OT_APPLY') %}
+  <form class="card" method="post" id="ot_form" data-slots-url="{{ url_for('overtime.api_overtime_slots') }}"
+        data-preview-url="{{ url_for('overtime.api_overtime_preview') }}">
+    <h2>我的加班</h2>
+    {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+    <div class="grid">
+      <div>
+        <label for="ot_start_date">開始日期</label>
+        <input type="date" id="ot_start_date" name="start_date" value="{{ form.start_date }}" required>
+      </div>
+      <div data-ot="unit">
+        <label for="ot_end_date">結束日期</label>
+        <input type="date" id="ot_end_date" name="end_date" value="{{ form.end_date or '' }}" data-optional>
+        <div class="hint">只申請一天可留空</div>
+      </div>
+      <div>
+        <label for="ot_mode">方式</label>
+        <select id="ot_mode" name="mode">
+          <option value="time" {% if form.mode != 'unit' %}selected{% endif %}>填時間（上班日提早上班 / 延後下班，一次一天）</option>
+          <option value="unit" {% if form.mode == 'unit' %}selected{% endif %}>整天 / 半天（沒有上班的日子，可多天）</option>
+        </select>
+      </div>
+      <div data-ot="time">
+        <label for="ot_start_time">開始時間</label>
+        <select id="ot_start_time" name="start_time" data-value="{{ form.start_time or '' }}"><option value="">請先選日期</option></select>
+        <div class="hint" id="ot_shift_hint"></div>
+      </div>
+      <div data-ot="time">
+        <label for="ot_end_time">結束時間</label>
+        <select id="ot_end_time" name="end_time" data-value="{{ form.end_time or '' }}"><option value="">請先選開始時間</option></select>
+        <div class="hint">至少 {{ ot_min_hours }} 小時、每 {{ time_step }} 分鐘一格；只列出不和你的班重疊的時段</div>
+      </div>
+      <div data-ot="unit">
+        <label for="ot_shift_code">加班班別</label>
+        <select id="ot_shift_code" name="shift_code">
+          <option value="">請選擇</option>
+          {% for s in ot_shifts %}<option value="{{ s.shift_code }}" {% if form.shift_code == s.shift_code %}selected{% endif %}>{{ s.shift_code }} · {{ s.shift_name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="ot_reason">原因</label>
+        <input type="text" id="ot_reason" name="reason" value="{{ form.reason or '' }}" placeholder="例如：月底結帳">
+      </div>
+    </div>
+    <div class="hint" id="ot_preview" aria-live="polite"></div>
+    <button type="submit">送出申請</button>
+  </form>
+
+  <div class="card">
+    <h2>我的申請紀錄</h2>
+    {% if mine %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>原因</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in mine %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Pending' %}
+          <form method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？">
+            <button type="submit" class="link">撤回</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">申請送出後不能修改，請撤回後重新申請；已核准的加班如需取消，請聯絡主管。最多顯示 {{ leave_limit }} 筆。</div>
+    {% else %}
+    <p class="sub">還沒有申請紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can('OT_APPROVE') %}
+  <div class="card">
+    <div class="head">
+      <h2>審核紀錄</h2>
+      <a class="btn secondary" href="{{ url_for('overtime.export_overtime_history') }}">匯出檔案</a>
+    </div>
+    {% if history %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in history %}
+      <tr>
+        <td>{{ q.request_id }}</td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }}</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Approved' %}
+          <form class="inline" method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}"
+                data-confirm="取消後會刪除這張單寫入的加班，確定取消 {{ q.request_id }}？">
+            <input type="text" name="note" placeholder="取消原因（選填）">
+            <button type="submit" class="danger">取消</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">還沒有審核紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endblock %}
+{% block script %}
+{% if can('OT_APPLY') %}<script src="{{ url_for('static', filename='overtime.js') }}"></script>{% endif %}
+{% endblock %}

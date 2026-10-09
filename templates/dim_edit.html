@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}{{ '編輯' if key else '新增' }}{{ meta.label }}{% endblock %}
+{% block content %}
+  <h1>{% if key %}編輯{{ meta.label }}：{{ key }}{% else %}新增{{ meta.label }}{% endif %}</h1>
+  <p class="sub">{{ meta.table }}</p>
+  {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+
+  <form class="card" method="post">
+    <div class="grid">
+    {% for f in fields %}
+      {% set v = values.get(f.name) %}
+      {% if f.pk and (key or meta.pk_mode == 'derived') %}
+        {% if key %}
+        <div>
+          <label>{{ f.name }}</label>
+          <input type="text" value="{{ key }}" disabled>
+          <div class="hint">{% if meta.pk_mode == 'derived' %}由 calendar_code 與 holiday_date 自動產生{% else %}主鍵不可修改{% endif %}</div>
+        </div>
+        {% endif %}
+      {% elif f.type == 'readonly' %}
+        {% if key %}
+        <div>
+          <label>{{ f.name }} (UTC)</label>
+          <input type="text" value="{{ v|utc_text }}" disabled>
+          <div class="hint">系統自動記錄</div>
+        </div>
+        {% endif %}
+      {% elif f.type == 'derived' %}
+        <div>
+          <label>{{ f.name }}</label>
+          <input type="text" value="{{ v or '' }}" disabled>
+          <div class="hint">由 parent_id 自動帶出</div>
+        </div>
+      {% elif f.type == 'perms' %}
+        {% set chosen = (v or '').split(',') %}
+        <div class="perms">
+          <label>{{ f.name }}</label>
+          {% for p in f.options %}
+          <label class="check"><input type="checkbox" name="{{ f.name }}" value="{{ p }}" {% if p in chosen %}checked{% endif %}> {{ p }}</label>
+          {% endfor %}
+          <button type="button" class="link" id="perm_default" data-agent='{{ agent_perms|tojson }}' data-all='{{ all_perms|tojson }}'>依角色套用預設</button>
+          <div class="hint">Agent：{{ agent_perms|join('、') }}；其他角色：全部。全不勾選時依角色套用預設。</div>
+        </div>
+      {% elif f.type == 'bool' %}
+        <div><label class="check"><input type="checkbox" name="{{ f.name }}" {% if v and v != '0' %}checked{% endif %}> {{ f.name }}</label></div>
+      {% elif f.type == 'time' %}
+        <div>
+          <label for="{{ f.name }}">{{ f.name }}</label>
+          <select id="{{ f.name }}" name="{{ f.name }}" {% if f.required %}required{% endif %}>
+            <option value="">—</option>
+            {% if v and v not in time_options %}<option value="{{ v }}" selected>{{ v }}</option>{% endif %}
+            {% for t in time_options %}<option value="{{ t }}" {% if v == t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+          </select>
+          <div class="hint">每 {{ time_step }} 分鐘一格；下班早於上班視為跨日</div>
+        </div>
+      {% elif f.type == 'select' %}
+        <div>
+          <label for="{{ f.name }}">{{ f.name }}</label>
+          <select id="{{ f.name }}" name="{{ f.name }}" {% if f.required %}required{% endif %}>
+            <option value="">—</option>
+            {% for val, text in f.options %}
+            <option value="{{ val }}" {% if v == val %}selected{% endif %}>{{ text }}</option>
+            {% endfor %}
+          </select>
+          {% if f.name == 'parent_id' %}<div class="hint">必填；只列在職的非 Agent。最高主管請選自己。</div>{% endif %}
+        </div>
+      {% else %}
+        <div>
+          <label for="{{ f.name }}">{{ f.name }}</label>
+          <input type="{{ f.type }}" id="{{ f.name }}" name="{{ f.name }}" value="{{ '' if v is none else v }}"
+            {% if f.type == 'number' %}step="any"{% endif %}
+            {% if f.required and not (f.pk and meta.pk_mode == 'auto') %}required{% endif %}>
+          {% if f.pk and meta.pk_mode == 'auto' %}<div class="hint">留空自動產生</div>{% endif %}
+        </div>
+      {% endif %}
+    {% endfor %}
+    {% if kind == 'employee' %}
+      <div>
+        <label for="new_password">{{ '重設密碼' if key else '登入密碼' }}</label>
+        <input type="password" id="new_password" name="new_password" minlength="{{ password_min_length }}" autocomplete="new-password">
+        <div class="hint">至少 {{ password_min_length }} 個字元；{{ '留空表示不變更' if key else '留空則此員工暫時無法登入' }}。登入帳號為 email。</div>
+      </div>
+    {% endif %}
+    </div>
+    <button type="submit">儲存</button>
+    <a class="back" href="{{ url_for('dim.dim_list', kind=kind) }}">返回列表</a>
+  </form>
+
+  {% if key and can('USER_DELETE') %}
+  <form method="post" action="{{ url_for('dim.dim_delete', kind=kind) }}" data-confirm="確定刪除這筆資料？">
+    <input type="hidden" name="key" value="{{ key }}">
+    <button type="submit" class="danger">刪除</button>
+  </form>
+  {% endif %}
+{% endblock %}
+{% block script %}
+{% if kind == 'employee' %}<script src="{{ url_for('static', filename='dim_edit.js') }}"></script>{% endif %}
+{% endblock %}

@@ -4,7 +4,8 @@ import datetime as dt
 from flask import Blueprint, abort, g, jsonify, render_template, request
 
 import config
-import html_template
+import forms
+import views
 
 from .common import (audit, can, check_leave_shift, check_own_employee, csv_download, db, log, require,
                      result_counts)
@@ -27,21 +28,21 @@ def index():
     employees = [e for e in employees if e["employee_id"] == uid]   # 本頁所有「成員」下拉只有登入者
     results, error = None, None
     edit, edit_error = None, None          # edit 有值時，頁面載入後自動開啟修改彈窗
-    form = dict(html_template.default_form(), employee_id=uid)
+    form = dict(forms.default_form(), employee_id=uid)
     hidden = {config.CATEGORY_LABEL["OT"]}   # 加班要到加班頁申請，提交班表的下拉不列加班班別
     if not can("LEAVE_APPROVE"):           # 請假改走申請流程，班別下拉不列請假代碼
         hidden.add(config.CATEGORY_LABEL["LEAVE"])
     shift_groups = [(label, items) for label, items in shift_groups if label not in hidden]
 
     if request.method == "POST":
-        posted = html_template.parse_submit_form(request.form)
+        posted = forms.parse_submit_form(request.form)
         if not can("USER_EDIT" if posted["edit_key"] else "USER_CREATE"):
             abort(403)
         if not posted["edit_key"]:
             form = dict(posted, employee_id=uid)
         try:
-            start = html_template.parse_date(posted["start_date"])
-            end = html_template.parse_date(posted["end_date"]) or start
+            start = forms.parse_date(posted["start_date"])
+            end = forms.parse_date(posted["end_date"]) or start
             if not (posted["employee_id"] and posted["shift_code"] and start):
                 raise ValueError("請選擇員工、班別與開始日期")
             if posted["employee_id"] != uid:
@@ -62,7 +63,7 @@ def index():
             log.warning("提交班表被拒", extra={"action": "roster_submit", "error": str(e)})
             row = db().get_roster(posted["edit_key"]) if posted["edit_key"] else None
             if row is not None:
-                edit, edit_error = html_template.edit_payload(row, posted), str(e)
+                edit, edit_error = views.edit_payload(row, posted), str(e)
             else:
                 error = str(e)
     elif request.args.get("edit") and can("USER_EDIT"):   # 也支援 /?edit=<roster_key> 直接開啟彈窗
@@ -70,14 +71,14 @@ def index():
         if row is None or row["employee_id"] != uid:
             error = f"找不到 {request.args['edit']}"
         else:
-            edit = html_template.edit_payload(row)
+            edit = views.edit_payload(row)
 
-    view = dict(html_template.parse_view_filter(request.args), emp=uid)   # 查詢也只能看自己
+    view = dict(forms.parse_view_filter(request.args), emp=uid)   # 查詢也只能看自己
     recent = db().recent_roster(view["emp"], view["date_from"], view["date_to"])
     recent_ot = db().recent_overtime(uid, view["date_from"], view["date_to"])
 
     year, month = pivot_period()
-    pivot = html_template.pivot_to_view(*db().roster_pivot(year, month), year, month)
+    pivot = views.pivot_to_view(*db().roster_pivot(year, month), year, month)
 
     summary = result_counts(results or [])
     return render_template("roster.html", employees=employees, submit_employees=employees,
@@ -94,8 +95,8 @@ def index():
 def export_roster():
     """排班總覽：依目前選的年份 / 月份匯出。"""
     year, month = pivot_period()
-    view = html_template.pivot_to_view(*db().roster_pivot(year, month), year, month)
-    columns, rows = html_template.pivot_export(view)
+    view = views.pivot_to_view(*db().roster_pivot(year, month), year, month)
+    columns, rows = views.pivot_export(view)
     audit("匯出排班總覽", "export", target="roster", year=year, month=month)
     return csv_download(f"roster_{year}{f'-{month:02d}' if month else ''}.csv", columns, rows)
 
@@ -105,7 +106,7 @@ def export_roster():
 def api_roster_detail():
     """總覽小計的逐日明細：?kind=work|leave|ot&year=2026&month=10&employee_id=EMP0003（不帶 employee_id = 所有人）"""
     kind = request.args.get("kind")
-    if kind not in html_template.DETAIL_LABELS:
+    if kind not in views.DETAIL_LABELS:
         return jsonify({"ok": False, "error": "kind 必須是 work / leave / ot"}), 400
     year, month = pivot_period()
     emp_id = request.args.get("employee_id") or None
@@ -118,7 +119,7 @@ def api_roster_detail():
     else:
         title = f"所有人 · {period}"
     rows = db().roster_detail(kind, year, month, emp_id)
-    return jsonify(html_template.detail_view(kind, rows, title, all_people=emp_id is None))
+    return jsonify(views.detail_view(kind, rows, title, all_people=emp_id is None))
 
 
 @bp.post("/api/roster")
@@ -127,7 +128,7 @@ def api_roster():
     """JSON 介面（需登入：cookie 或 Authorization: Bearer <token>）。
     {"employee_id":"EMP0004","shift_code":"S0918_FD","start_date":"2026-02-16","end_date":"2026-02-20"}"""
     try:
-        p = html_template.parse_api_payload(request.get_json(force=True))
+        p = forms.parse_api_payload(request.get_json(force=True))
         check_own_employee(p["employee_id"])
         check_leave_shift(p["shift_code"])
         results = db().submit_range(p["employee_id"], p["shift_code"], p["start_date"], p["end_date"],

@@ -21,20 +21,18 @@ import threading
 import time
 
 from flask import Flask
-from jinja2 import DictLoader
 
 import config
-import html_template
 import routes
+import views
 from db import RosterDB, backup_db
 from logger import cleanup_old_logs
 from routes.common import close_db, log
 
-app = Flask(__name__)
-app.jinja_loader = DictLoader(html_template.TEMPLATES)
-app.jinja_env.filters["utc_text"] = html_template.utc_text
-app.jinja_env.filters["edit_payload"] = html_template.edit_payload
-app.jinja_env.filters["days"] = html_template.days_text
+app = Flask(__name__)     # 頁面模板在 templates/，CSS / JS 在 static/
+app.jinja_env.filters["utc_text"] = views.utc_text
+app.jinja_env.filters["edit_payload"] = views.edit_payload
+app.jinja_env.filters["days"] = views.days_text
 app.jinja_env.globals.update(
     approval_statuses=config.APPROVAL_STATUSES,
     leave_status_labels=config.LEAVE_REQUEST_STATUSES,
@@ -51,6 +49,14 @@ app.jinja_env.globals.update(
 )
 app.teardown_appcontext(close_db)
 routes.register(app)     # 各業務的 API 見 routes/：auth、roster、overtime、leave、dim
+
+
+@app.after_request
+def set_csp(response):
+    """只允許載入本站的 script / CSS：就算有內容沒跳脫好，被塞進頁面的 <script> 也不會執行。
+    所以模板裡不能寫 inline <script>、<style>、onclick= 等，一律放 static/。"""
+    response.headers.setdefault("Content-Security-Policy", config.CONTENT_SECURITY_POLICY)
+    return response
 
 
 

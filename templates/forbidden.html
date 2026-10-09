@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}沒有權限{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1>沒有權限</h1>
+    <p class="sub">你的帳號沒有這項操作的權限，如有需要請聯絡主管。</p>
+    <a class="btn" href="{{ url_for('roster.index') }}">回到排班總覽</a>
+  </div>
+{% endblock %}

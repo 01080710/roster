@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Vantage Roster Situation{% endblock %}</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script>   {# 放 head、不加 defer：畫面繪出前套用主題，避免閃爍 #}
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+<nav><div>
+  <span class="brand">Vantage Roster Situation</span>
+  {% if current_user %}
+  <a href="{{ url_for('roster.index') }}" {% if request.endpoint == 'roster.index' %}class="on"{% endif %}>排班總覽</a>
+  {% endif %}
+  {% if can_leave %}
+  <a href="{{ url_for('leave.leave') }}" {% if request.endpoint == 'leave.leave' %}class="on"{% endif %}>請假{% if nav_pending_leave %}<span class="count">{{ nav_pending_leave }}</span>{% endif %}</a>
+  {% endif %}
+  {% if can_overtime %}
+  <a href="{{ url_for('overtime.overtime') }}" {% if request.endpoint == 'overtime.overtime' %}class="on"{% endif %}>加班{% if nav_pending_overtime %}<span class="count">{{ nav_pending_overtime }}</span>{% endif %}</a>
+  {% endif %}
+  {% for k, label in nav_dims %}
+  <a href="{{ url_for('dim.dim_list', kind=k) }}"
+     {% if request.view_args and request.view_args.get('kind') == k %}class="on"{% endif %}>{{ label }}</a>
+  {% endfor %}
+  <button type="button" class="theme" id="theme_toggle"></button>
+  {% if current_user %}
+  <form class="who" method="post" action="{{ url_for('auth.logout') }}">
+    <span>{{ current_user.full_name }} · {{ current_user.role or '—' }}</span>
+    {% if token_exp %}<span class="exp" id="token_exp" data-exp="{{ token_exp }}"></span>{% endif %}
+    <button type="submit">登出</button>
+  </form>
+  {% endif %}
+</div></nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<script src="{{ url_for('static', filename='base.js') }}"></script>
+{% block script %}{% endblock %}
+</body>
+</html>

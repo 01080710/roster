@@ -35,7 +35,10 @@
 | [config.py](config.py) | 可調整的設定：排班規則、代碼選項、權限、備份與日誌 |
 | [db.py](db.py) | 資料表定義、初始資料、升級舊資料庫，以及所有資料讀寫與業務規則 |
 | [logger.py](logger.py) | JSON 日誌，依日期 / 使用者 / 面向寫檔（見第 10 節） |
-| [html_template.py](html_template.py) | 頁面模板與畫面資料轉換 |
+| [templates/](templates/) | 頁面模板（Jinja，base.html 為共用版面） |
+| [static/](static/) | CSS 與各頁 JS（CSP 禁止 inline script / style） |
+| [forms.py](forms.py) | 表單 / JSON 輸入解析與表單預設值 |
+| [views.py](views.py) | 畫面與匯出用的資料轉換、模板 filter |
 | [routes/](routes/) | 依業務拆分的網址與 API：`auth`（登入、身分驗證）、`roster`（排班總覽、提交班表）、`leave`（請假）、`overtime`（加班）、`dim`（主檔）；共用的權限檢查、日誌與 CSV 下載在 `common` |
 
 ## 1. 業務流程
@@ -525,6 +528,15 @@ flowchart LR
     perm -->|OT_APPLY| ot_apply["申請 / 撤回加班"]
     perm -->|OT_APPROVE| ot_approve["審核下屬加班<br/>取消已核准加班"]
 ```
+
+### 網頁的瀏覽器保護
+
+每個頁面都會附上安全設定（Content-Security-Policy，內容見 `config.CONTENT_SECURITY_POLICY`），要求瀏覽器：
+
+- 只執行本系統 [static/](static/) 資料夾裡的程式與樣式。就算有人在備註、請假原因等欄位填入惡意程式碼，瀏覽器也不會執行。
+- 不允許其他網站把本系統嵌進它們的頁面（防止偽裝成本系統騙使用者點擊）。
+
+開發時要注意：頁面模板（[templates/](templates/)）裡不能直接寫程式或樣式（`<script>…</script>`、`<style>`、`onclick=` 這類寫法會被瀏覽器擋掉），要放到 `static/` 的檔案；頁面需要的伺服器資料用 `data-*` 屬性傳給程式。送出前的確認視窗用 `<form data-confirm="訊息">`，下拉選單選了就送出用 `<select data-autosubmit>`。
 
 ### 匯出檔案
 

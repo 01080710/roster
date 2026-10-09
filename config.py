@@ -92,6 +92,10 @@ JWT_COOKIE_NAME = "access_token"
 JWT_COOKIE_SECURE = _env_bool("ROSTER_COOKIE_SECURE", False)            # 環境變數；走 HTTPS 時設 true
 JWT_COOKIE_SAMESITE = "Lax"
 
+# 瀏覽器只執行 / 套用本站 static/ 的 JS 與 CSS（禁止 inline）；禁止被其他網站用 iframe 嵌入
+CONTENT_SECURITY_POLICY = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                           "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+
 
 # 備份：啟動時一次 + 每天 BACKUP_HOUR 點一次，複製成 backups/roster_YYYYMMDD_HHMMSS.db
 # 同一天只留最新一份，最多保留最近 BACKUP_KEEP_DAYS 天，舊的自動刪除

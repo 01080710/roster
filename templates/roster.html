@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% macro shift_options(selected) %}
+          <option value="">請選擇</option>
+          {% for label, items in shift_groups %}
+          <optgroup label="{{ label }}">
+            {% for s in items %}
+            <option value="{{ s.shift_code }}" data-status="{{ s.status_group }}"
+              {% if selected == s.shift_code %}selected{% endif %}>
+              {{ s.shift_code }} · {{ s.roster_display }}{% if s.shift_name != 'Shift ' ~ s.roster_display %} · {{ s.shift_name }}{% endif %}</option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+{% endmacro %}
+{% macro approval_options(selected) %}
+          <option value="">—</option>
+          {% for a in approval_statuses %}
+          <option {% if selected == a %}selected{% endif %}>{{ a }}</option>
+          {% endfor %}
+{% endmacro %}
+{% block title %}排班總覽 · Vantage Roster Situation{% endblock %}
+{% block content %}
+  <h1>排班總覽</h1>
+  <p class="sub">查看每個人每天的班、請假與加班；點小計數字可以看逐日明細。</p>
+  {% if nav_pending_leave %}<div class="banner info">有 {{ nav_pending_leave }} 張請假申請等你審核，<a href="{{ url_for('leave.leave') }}">前往審核</a></div>{% endif %}
+  {% if nav_pending_overtime %}<div class="banner info">有 {{ nav_pending_overtime }} 張加班申請等你審核，<a href="{{ url_for('overtime.overtime') }}">前往審核</a></div>{% endif %}
+
+  <div class="card">
+    <form class="head" method="get">
+      <h2>{{ pivot.year }} 年{% if pivot.month %} {{ pivot.month }} 月{% else %}度{% endif %}總覽</h2>
+      <div class="tools">
+        <select name="year" data-autosubmit>
+          {% for y in pivot.years %}<option {% if y == pivot.year %}selected{% endif %}>{{ y }}</option>{% endfor %}
+        </select>
+        <select name="month" data-autosubmit>
+          <option value="">全年</option>
+          {% for m in range(1, 13) %}<option value="{{ m }}" {% if m == pivot.month %}selected{% endif %}>{{ m }} 月</option>{% endfor %}
+        </select>
+        <a class="btn secondary" href="{{ url_for('roster.export_roster', year=pivot.year, month=pivot.month) }}">匯出檔案</a>
+      </div>
+    </form>
+    <div class="legend">
+      {% for code, label in situation_labels %}<span class="s-{{ code }}">{{ label }}</span>{% endfor %}
+      <span class="note">「+OT」：當天有已核准的加班　虛線框：待審核，不計入小計</span>
+    </div>
+    {% if pivot.rows %}
+    <div class="pivot"><table>
+      <thead><tr>
+        <th class="k k1">team</th><th class="k k2">office_code</th><th class="k k3">full_name</th>
+        <th class="k t1 drill" data-kind="work" title="所選年度或月份的天數小計，半天算 0.5。點擊看所有人的逐日明細">上班 <i class="info">ⓘ</i></th>
+        <th class="k t2 drill" data-kind="leave" title="所選年度或月份的天數小計，半天算 0.5。點擊看所有人的逐日明細">請假 <i class="info">ⓘ</i></th>
+        <th class="k t3 drill" data-kind="ot" title="所選年度或月份的天數小計，半天算 0.5；加班依時數換算，{{ ot_full_day_hours }} 小時 = 1 天，另外顯示時數。點擊看所有人的逐日明細">加班 <i class="info">ⓘ</i></th>
+        {% for c in pivot.columns %}<th {% if c.weekend %}class="wkend"{% endif %}>{{ c.label }}<small>{{ c.weekday }}</small></th>{% endfor %}
+      </tr></thead>
+      <tbody>
+      {% for r in pivot.rows %}
+      <tr>
+        <td class="k k1">{{ r.team }}</td><td class="k k2">{{ r.office_code }}</td><td class="k k3">{{ r.full_name }}</td>
+        <td class="k t1 drill" data-kind="work" data-emp="{{ r.employee_id }}">{{ r.work }}</td>
+        <td class="k t2 drill" data-kind="leave" data-emp="{{ r.employee_id }}">{{ r.leave }}</td>
+        <td class="k t3 drill" data-kind="ot" data-emp="{{ r.employee_id }}">{{ r.ot }}{% if r.ot_hours %}<small> · {{ r.ot_hours }}h</small>{% endif %}</td>
+        {% for v, s in r.cells %}<td class="{% if s %}s-{{ s }}{% elif pivot.columns[loop.index0].weekend %}wkend empty{% else %}empty{% endif %}">{{ v or '·' }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <p class="sub">{{ pivot.year }} 年{% if pivot.month %} {{ pivot.month }} 月{% endif %}還沒有排班資料。</p>
+    {% endif %}
+  </div>
+
+  {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+  {% if msg %}<div class="banner {% if not msg_error %}info{% endif %}">{{ msg }}</div>{% endif %}
+
+  {% if can('USER_CREATE') %}
+  <form class="card" method="post">
+    <h2>提交班表</h2>
+    <div class="grid">
+      <div>
+        <label for="employee_id">成員</label>
+        <select id="employee_id" name="employee_id" required>
+          {% if submit_employees|length != 1 %}<option value="">請選擇</option>{% endif %}
+          {% for e in submit_employees %}
+          <option value="{{ e.employee_id }}" data-default="{{ e.default_shift_code or '' }}"
+            {% if form.employee_id == e.employee_id %}selected{% endif %}>
+            {{ e.employee_id }} · {{ e.full_name }} ({{ e.office_code }} / {{ e.team }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="shift_code">班別 / 狀況</label>
+        <select id="shift_code" name="shift_code" required>{{ shift_options(form.shift_code) }}</select>
+      </div>
+      <div>
+        <label for="start_date">開始日期</label>
+        <input type="date" id="start_date" name="start_date" value="{{ form.start_date }}" required>
+      </div>
+      <div>
+        <label for="end_date">結束日期</label>
+        <input type="date" id="end_date" name="end_date" value="{{ form.end_date }}">
+        <div class="hint">只排一天可留空</div>
+      </div>
+      <div id="approval_box">
+        <label for="leave_approval_status">請假核准狀態</label>
+        <select id="leave_approval_status" name="leave_approval_status">{{ approval_options(form.leave_approval_status) }}</select>
+      </div>
+      <div>
+        <label for="remarks">備註</label>
+        <input type="text" id="remarks" name="remarks" value="{{ form.remarks or '' }}" placeholder="例如：與 EMP0005 換班">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="skip_non_working" {% if form.skip_non_working %}checked{% endif %}>
+      日期區間內遇到休息日或國定假日時略過（上班與請假班別適用）</label>
+    <button type="submit">送出</button>
+  </form>
+  {% endif %}
+
+  {% if results %}
+  <div class="card">
+    <h2>提交結果：新增 {{ summary.created }} 筆、更新 {{ summary.updated }} 筆、略過 {{ summary.skipped }} 筆、失敗 {{ summary.error }} 筆</h2>
+    <div class="scroll"><table>
+      <tr><th>日期</th><th>星期</th><th>結果</th><th>日別</th><th>班別</th><th>上班時間</th><th>工時</th><th>提醒</th></tr>
+      {% for r in results %}
+      <tr>
+        <td>{{ r.date }}</td>
+        <td>{{ r.row.weekday if r.row else '' }}</td>
+        <td><span class="tag {{ r.action }}">{{ {'created':'新增','updated':'更新','skipped':'略過','error':'失敗'}[r.action] }}</span></td>
+        <td>{{ r.row.day_type if r.row else '' }}{% if r.row and r.row.holiday_name %} · {{ r.row.holiday_name }}{% endif %}</td>
+        <td>{{ r.row.shift_code if r.row else '' }}</td>
+        <td>{% if r.row and r.row.planned_start_local %}{{ r.row.planned_start_local[11:] }} → {{ r.row.planned_end_local[11:] }}{% endif %}</td>
+        <td>{{ r.row.planned_hours if r.row else '' }}</td>
+        <td class="msg {% if r.action != 'skipped' %}flag{% endif %}">{{ r.message }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2>查詢與修改</h2>
+    <form class="filter" method="get">
+      <input type="hidden" name="year" value="{{ pivot.year }}">
+      <input type="hidden" name="month" value="{{ pivot.month or '' }}">
+      <div>
+        <label for="view_emp">成員</label>
+        <select id="view_emp" name="view_emp">
+          {% for e in employees %}
+          <option value="{{ e.employee_id }}" {% if view.emp == e.employee_id %}selected{% endif %}>{{ e.employee_id }} · {{ e.full_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="view_from">日期起</label>
+        <input type="date" id="view_from" name="view_from" value="{{ view.date_from or '' }}">
+      </div>
+      <div>
+        <label for="view_to">日期迄</label>
+        <input type="date" id="view_to" name="view_to" value="{{ view.date_to or '' }}">
+      </div>
+      <button type="submit">查詢</button>
+    </form>
+    {% if recent %}
+    <div class="scroll"><table>
+      <tr>{% if can('USER_EDIT') %}<th></th>{% endif %}<th>roster_key</th><th>姓名</th><th>星期</th><th>班別</th><th>狀態</th><th>日別</th><th>工時</th>
+          <th>工作天</th><th>請假</th><th>版本</th><th>updatetime (UTC)</th><th>檢查</th></tr>
+      {% for r in recent %}
+      <tr>
+        {% if can('USER_EDIT') %}<td><button type="button" class="link" data-edit='{{ r|edit_payload|tojson }}'>修改</button></td>{% endif %}
+        <td>{{ r.roster_key }}</td><td>{{ r.full_name }}</td><td>{{ r.weekday }}</td>
+        <td>{{ r.shift_code }}</td><td>{{ r.status_group }}</td>
+        <td>{{ r.day_type }}</td><td>{{ r.planned_hours }}</td><td>{{ r.work_fraction }}</td>
+        <td>{{ r.leave_fraction }}</td><td>{{ r.roster_version }}</td>
+        <td>{{ r.updated_at|utc_text }}</td>
+        <td class="msg flag">{{ r.check_flag or '' }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">最多顯示 {{ recent_limit }} 筆，依日期由新到舊。</div>
+    {% else %}
+    <p class="sub">查無資料。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="head">
+      <h2>加班紀錄（已核准）</h2>
+      {% if can_overtime %}<a class="btn secondary" href="{{ url_for('overtime.overtime') }}">申請加班</a>{% endif %}
+    </div>
+    {% if recent_ot %}
+    <div class="scroll"><table>
+      <tr><th>日期</th><th>星期</th><th>日別</th><th>方式</th><th>時間 / 班別</th><th>時數</th><th>天數</th><th>申請單</th>
+          <th>updatetime (UTC)</th><th>備註 / 檢查</th>{% if can('USER_EDIT') %}<th></th>{% endif %}</tr>
+      {% for o in recent_ot %}
+      <tr>
+        <td>{{ o.overtime_date }}</td><td>{{ o.weekday }}</td>
+        <td>{{ o.day_type }}{% if o.holiday_name %} · {{ o.holiday_name }}{% endif %}</td>
+        <td>{{ '整天 / 半天' if o.shift_code else '時間' }}</td>
+        <td>{% if o.shift_code %}{{ o.shift_code }} · {{ o.roster_display }}{% else %}{{ o.start_local[11:] }} → {{ o.end_local[11:] }}{% endif %}</td>
+        <td>{{ o.ot_hours if o.ot_hours is not none else '' }}</td><td>{{ o.ot_fraction|days }}</td>
+        <td>{{ o.overtime_request_id or '舊資料' }}</td>
+        <td>{{ o.updated_at|utc_text }}</td>
+        <td class="msg">{{ o.remarks or '' }}{% if o.check_flag %}<span class="flag">{{ (' ；' if o.remarks else '') ~ o.check_flag }}</span>{% endif %}</td>
+        {% if can('USER_EDIT') %}<td>{% if not o.overtime_request_id %}
+          <form method="post" action="{{ url_for('overtime.overtime_record_delete', overtime_key=o.overtime_key) }}"
+                data-confirm="確定刪除 {{ o.overtime_date }} 的加班？">
+            <button type="submit" class="link">刪除</button>
+          </form>{% endif %}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">依上方查詢條件，最多顯示 {{ recent_limit }} 筆。由申請單核准的加班如需取消，請聯絡主管在加班頁取消。</div>
+    {% else %}
+    <p class="sub">查無加班紀錄。</p>
+    {% endif %}
+  </div>
+
+  {% if can('USER_EDIT') %}
+  <dialog id="edit_dialog"{% if edit %} data-open='{{ edit|tojson }}' data-error="{{ edit_error or '' }}"{% endif %}>
+    <form method="post">
+      <div class="head">
+        <h2>修改排班</h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <div class="banner" data-f="error" {% if not edit_error %}hidden{% endif %}>{{ edit_error or '' }}</div>
+      <dl class="meta">
+        <dt>roster_key</dt><dd data-f="edit_key"></dd>
+        <dt>成員</dt><dd data-f="who"></dd>
+        <dt>日期</dt><dd data-f="start_date"></dd>
+        <dt>版本 / updatetime (UTC)</dt><dd data-f="version"></dd>
+      </dl>
+      <input type="hidden" name="edit_key">
+      <input type="hidden" name="employee_id">
+      <input type="hidden" name="start_date">
+      <div class="grid">
+        <div>
+          <label for="dlg_shift_code">班別 / 狀況</label>
+          <select id="dlg_shift_code" name="shift_code" required>{{ shift_options(none) }}</select>
+        </div>
+        <div id="dlg_approval_box">
+          <label for="dlg_approval">請假核准狀態</label>
+          <select id="dlg_approval" name="leave_approval_status">{{ approval_options(none) }}</select>
+        </div>
+        <div>
+          <label for="dlg_remarks">備註</label>
+          <input type="text" id="dlg_remarks" name="remarks">
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="secondary" data-close>取消</button>
+        <button type="submit">儲存修改</button>
+      </div>
+    </form>
+  </dialog>
+  {% endif %}
+
+  <dialog id="detail_dialog" class="wide" data-url="{{ url_for('roster.api_roster_detail') }}"
+          data-year="{{ pivot.year }}" data-month="{{ pivot.month or '' }}">
+    <div class="body">
+      <div class="head">
+        <h2 data-f="title"></h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <div class="scroll"><table><thead><tr data-f="cols"></tr></thead><tbody data-f="rows"></tbody></table></div>
+      <p class="sub" data-f="empty" hidden>這段期間沒有資料。</p>
+    </div>
+  </dialog>
+{% endblock %}
+{% block script %}<script src="{{ url_for('static', filename='roster.js') }}"></script>{% endblock %}

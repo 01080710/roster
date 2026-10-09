@@ -9,7 +9,7 @@ from flask import (Response, abort, current_app, g, got_request_exception, has_r
                    redirect, request, url_for)
 
 import config
-import html_template
+import views
 from db import RosterDB
 from logger import SYSTEM_USER, get_logger
 
@@ -129,6 +129,6 @@ def csv_download(filename, columns, rows):
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(columns)
-    writer.writerows([html_template.csv_safe(v) for v in r] for r in rows)
+    writer.writerows([views.csv_safe(v) for v in r] for r in rows)
     return Response("﻿" + buf.getvalue(), mimetype="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})

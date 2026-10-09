@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}請假 · Vantage Roster Situation{% endblock %}
+{% macro status_tag(st) %}<span class="tag st-{{ st }}">{{ leave_status_labels[st] }}</span>{% endmacro %}
+{% macro period(q) %}{{ q.start_date }}{% if q.end_date != q.start_date %} → {{ q.end_date }}{% endif %}{% endmacro %}
+{% block content %}
+  <h1>請假</h1>
+  <p class="sub">送出申請後由主管審核，核准後才寫入班表；待審核的假會在排班總覽以虛線框顯示，不計入請假天數。</p>
+  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+
+  {% if can('LEAVE_APPROVE') %}
+  <div class="card">
+    <h2>待審核（{{ pending|length }}）</h2>
+    <p class="hint">列出主管欄位（parent_id）是你的員工送出的申請；最高主管的申請由其他有審核權限的人審。你自己的申請由你的主管審核，不會出現在這裡。</p>
+    {% if pending %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>假別</th><th>日期</th><th>天數</th><th>原因</th><th>同 team 同期請假</th><th>審核</th></tr>
+      {% for q in pending %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }} · {{ q.office_code }} / {{ q.team or '—' }}</div></td>
+        <td>{{ q.shift_code }} · {{ q.roster_display }}</td>
+        <td>{{ period(q) }}</td>
+        <td>{{ q.days|days }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>已核准 {{ q.team_off }} 人 · 待審 {{ q.team_pending }} 人</td>
+        <td>
+          <form class="inline" method="post" action="{{ url_for('leave.leave_decide', request_id=q.request_id) }}">
+            <input type="text" name="decision_note" placeholder="審核意見（選填）">
+            <button name="decision" value="approve">核准</button>
+            <button name="decision" value="reject" class="danger">駁回</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">目前沒有待審核的申請。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="head">
+      <h2>請假月曆：{{ cal.year }} 年 {{ cal.month }} 月</h2>
+      <div class="tools">
+        <a class="btn secondary" href="{{ url_for('leave.leave', cal=cal.prev) }}">‹ 上個月</a>
+        <a class="btn secondary" href="{{ url_for('leave.leave') }}">本月</a>
+        <a class="btn secondary" href="{{ url_for('leave.leave', cal=cal.next) }}">下個月 ›</a>
+      </div>
+    </div>
+    <div class="cal">
+      {% for d in ['一', '二', '三', '四', '五', '六', '日'] %}<div class="dow">{{ d }}</div>{% endfor %}
+      {% for cell in cal.cells %}
+        {% if not cell %}<div class="day out"></div>
+        {% elif cell.people %}
+        <button type="button" class="day h{{ cell.heat }}{% if cell.today %} today{% endif %}{% if cell.pending %} has-pend{% endif %}" data-day='{{ cell|tojson }}'>
+          <span class="n">{{ cell.day }}</span>
+          <span class="cnt">{{ cell.approved }} 人{% if cell.pending %} <span class="pend">+{{ cell.pending }} 待審</span>{% endif %}</span>
+          {% for p in cell.people[:2] %}<span class="who">{{ p.name }}</span>{% endfor %}
+          {% if cell.people|length > 2 %}<span class="who">+{{ cell.people|length - 2 }} 人</span>{% endif %}
+        </button>
+        {% else %}<div class="day{% if cell.today %} today{% endif %}"><span class="n">{{ cell.day }}</span></div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <div class="cal-legend">請假人數：<i class="h1"></i>1 <i class="h2"></i>2 <i class="h3"></i>3 <i class="h4"></i>4+
+      ・<span class="pend">虛線 / 「待審」為尚未核准</span>・點日期看名單</div>
+  </div>
+
+  <dialog id="cal_dialog">
+    <div class="body">
+      <div class="head">
+        <h2 data-f="title"></h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <table><thead><tr><th>姓名</th><th>team</th><th>假別</th><th>狀態</th></tr></thead><tbody data-f="rows"></tbody></table>
+    </div>
+  </dialog>
+
+  {% if can('LEAVE_APPLY') %}
+  <form class="card" method="post" id="leave_form" data-preview-url="{{ url_for('leave.api_leave_preview') }}">
+    <h2>我的請假</h2>
+    {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+    <div class="grid">
+      <div>
+        <label for="leave_shift">假別</label>
+        <select id="leave_shift" name="shift_code" required>
+          <option value="">請選擇</option>
+          {% for leave_type, items in leave_groups %}
+          <optgroup label="{{ leave_type }}">
+            {% for s in items %}
+            <option value="{{ s.shift_code }}" data-portion="{{ s.day_portion }}" {% if form.shift_code == s.shift_code %}selected{% endif %}>
+              {{ s.shift_code }} · {{ s.shift_name }}{% if not s.deducts_leave_balance %}（不扣假）{% endif %}</option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="leave_start">開始日期</label>
+        <input type="date" id="leave_start" name="start_date" value="{{ form.start_date }}" required>
+      </div>
+      <div>
+        <label for="leave_end">結束日期</label>
+        <input type="date" id="leave_end" name="end_date" value="{{ form.end_date }}">
+        <div class="hint">只請一天可留空；半天 / 部分請假只能請單日，而且當天要已經排班，請假時段依當天的班計算</div>
+      </div>
+      <div>
+        <label for="leave_reason">原因</label>
+        <input type="text" id="leave_reason" name="reason" value="{{ form.reason or '' }}" placeholder="例如：家庭旅遊">
+      </div>
+    </div>
+    <div class="hint" id="leave_preview" aria-live="polite"></div>
+    <button type="submit">送出申請</button>
+  </form>
+
+  <div class="card">
+    <h2>我的申請紀錄</h2>
+    {% if mine %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>假別</th><th>日期</th><th>天數</th><th>原因</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in mine %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ q.shift_code }} · {{ q.roster_display }}</td>
+        <td>{{ period(q) }}</td>
+        <td>{{ q.days|days }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Pending' %}
+          <form method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？">
+            <button type="submit" class="link">撤回</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">已核准的假如需取消，請聯絡主管。最多顯示 {{ leave_limit }} 筆。</div>
+    {% else %}
+    <p class="sub">還沒有申請紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can('LEAVE_APPROVE') %}
+  <div class="card">
+    <div class="head">
+      <h2>審核紀錄</h2>
+      <a class="btn secondary" href="{{ url_for('leave.export_leave_history') }}">匯出檔案</a>
+    </div>
+    {% if history %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>假別</th><th>日期</th><th>天數</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in history %}
+      <tr>
+        <td>{{ q.request_id }}</td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }}</div></td>
+        <td>{{ q.shift_code }} · {{ q.roster_display }}</td>
+        <td>{{ period(q) }}</td>
+        <td>{{ q.days|days }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Approved' %}
+          <form class="inline" method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}"
+                data-confirm="取消後會把班表還原為預設班別，確定取消 {{ q.request_id }}？">
+            <input type="text" name="note" placeholder="取消原因（選填）">
+            <button type="submit" class="danger">取消</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">還沒有審核紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endblock %}
+{% block script %}
+<script src="{{ url_for('static', filename='leave.js') }}"></script>
+{% endblock %}

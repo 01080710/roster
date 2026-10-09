@@ -4,7 +4,8 @@ import datetime as dt
 from flask import Blueprint, abort, g, jsonify, redirect, render_template, request, url_for
 
 import config
-import html_template
+import forms
+import views
 
 from .common import audit, can, can_leave, csv_download, db, log, require
 
@@ -17,14 +18,14 @@ def leave():
     if not can_leave():
         abort(403)
     uid = g.user["employee_id"]
-    error, form = None, html_template.default_leave_form()
+    error, form = None, forms.default_leave_form()
     if request.method == "POST":
         if not can("LEAVE_APPLY"):
             abort(403)
-        form = html_template.parse_leave_form(request.form)
+        form = forms.parse_leave_form(request.form)
         try:
-            start = html_template.parse_date(form["start_date"])
-            end = html_template.parse_date(form["end_date"]) or start
+            start = forms.parse_date(form["start_date"])
+            end = forms.parse_date(form["end_date"]) or start
             if not (form["shift_code"] and start):
                 raise ValueError("請選擇假別與開始日期")
             rid = db().create_leave_request(uid, form["shift_code"], start, end, form["reason"])
@@ -38,13 +39,13 @@ def leave():
             error = str(e)
 
     approver = can("LEAVE_APPROVE")
-    cal_year, cal_month = html_template.parse_month(request.args.get("cal"))
+    cal_year, cal_month = forms.parse_month(request.args.get("cal"))
     return render_template(
         "leave.html", form=form, error=error,
-        cal=html_template.calendar_view(cal_year, cal_month, db().leave_calendar(cal_year, cal_month)),
+        cal=views.calendar_view(cal_year, cal_month, db().leave_calendar(cal_year, cal_month)),
         msg=request.args.get("msg"), msg_error=request.args.get("err") == "1",
         leave_groups=db().leave_shift_groups(),
-        mine=html_template.with_waiting_for(db().leave_requests(employee_id=uid), db().leave_approvers(uid))
+        mine=views.with_waiting_for(db().leave_requests(employee_id=uid), db().leave_approvers(uid))
              if can("LEAVE_APPLY") else [],
         pending=db().pending_for_approver(uid) if approver else [],
         history=db().leave_requests(approver_id=uid, statuses=["Approved", "Rejected", "Cancelled"]) if approver else [],
@@ -94,8 +95,8 @@ def leave_cancel(request_id):
 def api_leave_preview():
     """請假表單即時預覽：?shift_code=AL_FD&start_date=2026-10-12&end_date=2026-10-16"""
     try:
-        start = html_template.parse_date(request.args.get("start_date"))
-        end = html_template.parse_date(request.args.get("end_date")) or start
+        start = forms.parse_date(request.args.get("start_date"))
+        end = forms.parse_date(request.args.get("end_date")) or start
         shift_code = request.args.get("shift_code")
         if not (shift_code and start):
             raise ValueError("請選擇假別與開始日期")
@@ -106,7 +107,7 @@ def api_leave_preview():
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     # periods：非全天假時附上當天的班與請假時段，例如 {"shift": "S0918_FD 09:00 → 18:00", "leave": "09:00 → 13:00"}
-    return jsonify({"ok": True, "days": html_template.days_text(days), "dates": [r["roster_date"] for r in rows],
+    return jsonify({"ok": True, "days": views.days_text(days), "dates": [r["roster_date"] for r in rows],
                     "periods": [p for p in periods if p["leave"]]})
 
 
@@ -116,6 +117,6 @@ def export_leave_history():
     """審核紀錄：與頁面相同的範圍（自己可審的已處理申請），不限筆數。"""
     rows = db().leave_requests(approver_id=g.user["employee_id"], statuses=["Approved", "Rejected", "Cancelled"],
                                limit=-1)
-    columns, data = html_template.leave_export(rows, config.LEAVE_REQUEST_STATUSES)
+    columns, data = views.leave_export(rows, config.LEAVE_REQUEST_STATUSES)
     audit("匯出審核紀錄", "export", target="leave_history", rows=len(data))
     return csv_download(f"leave_history_{dt.date.today():%Y%m%d}.csv", columns, data)

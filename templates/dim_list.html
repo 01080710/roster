@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ meta.label }}{% endblock %}
+{% block content %}
+  <h1>{{ meta.label }}</h1>
+  <p class="sub">{{ meta.table }}，共 {{ rows|length }} 筆。點「編輯」查看完整欄位並修改。</p>
+  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+  <div class="card">
+    <div class="head">
+      <h2>資料列表</h2>
+      <div class="tools">
+        {% if can('USER_CREATE') %}<a class="btn" href="{{ url_for('dim.dim_edit', kind=kind) }}">新增{{ meta.label }}</a>{% endif %}
+        <a class="btn secondary" href="{{ url_for('dim.dim_export', kind=kind) }}">匯出檔案</a>
+      </div>
+    </div>
+    {% if rows %}
+    <div class="scroll"><table>
+      <tr>{% for c in meta.list_cols %}<th>{{ c }}{% if c in ('created_at', 'updated_at') %} (UTC){% endif %}</th>{% endfor %}<th></th></tr>
+      {% for r in rows %}
+      <tr>
+        {% for c in meta.list_cols %}<td>{% if c in ('created_at', 'updated_at') %}{{ r[c]|utc_text }}{% else %}{{ '' if r[c] is none else r[c] }}{% endif %}</td>{% endfor %}
+        <td><a href="{{ url_for('dim.dim_edit', kind=kind, key=r[meta.pk]) }}">編輯</a></td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">還沒有資料。</p>
+    {% endif %}
+  </div>
+{% endblock %}

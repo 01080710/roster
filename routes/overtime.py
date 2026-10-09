@@ -5,7 +5,8 @@ import datetime as dt
 from flask import Blueprint, abort, g, jsonify, redirect, render_template, request, url_for
 
 import config
-import html_template
+import forms
+import views
 
 from .common import audit, can, can_overtime, csv_download, db, log, require
 
@@ -30,11 +31,11 @@ def overtime():
     if not can_overtime():
         abort(403)
     uid = g.user["employee_id"]
-    error, form = None, html_template.default_overtime_form()
+    error, form = None, forms.default_overtime_form()
     if request.method == "POST":
         if not can("OT_APPLY"):
             abort(403)
-        p = html_template.parse_overtime_form(request.form)
+        p = forms.parse_overtime_form(request.form)
         form = p["raw"]
         try:
             rid = _create(uid, p)
@@ -49,7 +50,7 @@ def overtime():
         "overtime.html", form=form, error=error,
         msg=request.args.get("msg"), msg_error=request.args.get("err") == "1",
         ot_shifts=next((items for label, items in shift_groups if label == config.CATEGORY_LABEL["OT"]), []),
-        mine=html_template.with_waiting_for(db().overtime_requests(employee_id=uid), db().overtime_approvers(uid))
+        mine=views.with_waiting_for(db().overtime_requests(employee_id=uid), db().overtime_approvers(uid))
              if can("OT_APPLY") else [],
         pending=db().overtime_requests(approver_id=uid, statuses=["Pending"]) if approver else [],
         history=db().overtime_requests(approver_id=uid, statuses=["Approved", "Rejected", "Cancelled"])
@@ -116,7 +117,7 @@ def overtime_record_delete(overtime_key):
 def api_overtime_slots():
     """填時間的加班可以選的時段（依當天的班，見 RosterDB.overtime_slots）：?date=2026-11-02"""
     try:
-        day = html_template.parse_date(request.args.get("date"))
+        day = forms.parse_date(request.args.get("date"))
         if not day:
             raise ValueError("請選擇加班日期")
         slots = db().overtime_slots(g.user["employee_id"], day)
@@ -130,7 +131,7 @@ def api_overtime_slots():
 def api_overtime_preview():
     """加班表單即時預覽：?mode=time&start_date=2026-11-02&end_date=2026-11-06&start_time=18:00&end_time=21:00"""
     try:
-        p = html_template.parse_overtime_form(request.args)
+        p = forms.parse_overtime_form(request.args)
         if not p["start_date"]:
             raise ValueError("請選擇加班日期")
         rows, days, hours = db().plan_overtime(g.user["employee_id"], p["start_date"], p["end_date"],
@@ -140,8 +141,8 @@ def api_overtime_preview():
             raise ValueError(f"日期與加班申請單 {hit} 重疊")
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True, "days": html_template.days_text(days),
-                    "hours": html_template.days_text(hours) if hours else None,
+    return jsonify({"ok": True, "days": views.days_text(days),
+                    "hours": views.days_text(hours) if hours else None,
                     "dates": [r["overtime_date"] for r in rows]})
 
 
@@ -155,7 +156,7 @@ def api_overtime():
         body = request.get_json(force=True)
         if body.get("employee_id") not in (None, "", g.user["employee_id"]):
             raise ValueError("只能申請自己的加班")
-        rid = _create(g.user["employee_id"], html_template.parse_overtime_form(body))
+        rid = _create(g.user["employee_id"], forms.parse_overtime_form(body))
     except (KeyError, ValueError, TypeError, AttributeError) as e:
         log.warning("加班申請被拒", extra={"action": "overtime_apply", "via": "api", "error": str(e)})
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -168,6 +169,6 @@ def export_overtime_history():
     """審核紀錄：與頁面相同的範圍（自己可審的已處理申請），不限筆數。"""
     rows = db().overtime_requests(approver_id=g.user["employee_id"], statuses=["Approved", "Rejected", "Cancelled"],
                                   limit=-1)
-    columns, data = html_template.overtime_export(rows, config.LEAVE_REQUEST_STATUSES)
+    columns, data = views.overtime_export(rows, config.LEAVE_REQUEST_STATUSES)
     audit("匯出加班審核紀錄", "export", target="overtime_history", rows=len(data))
     return csv_download(f"overtime_history_{dt.date.today():%Y%m%d}.csv", columns, data)
