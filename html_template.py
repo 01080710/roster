@@ -155,8 +155,11 @@ BASE = """
   .s-OFF { background:var(--off-bg); color:var(--off-fg); }
   .s-ACTIVITY { background:var(--act-bg); color:var(--act-fg); }
   .s-PENDING { background:transparent; color:var(--pend-fg); outline:1px dashed var(--warn); outline-offset:-3px; }
+  .s-OT_PENDING { background:transparent; color:var(--ot-fg); outline:1px dashed var(--ot-fg); outline-offset:-3px; }
   .legend { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; font-size:12px; }
   .legend span { padding:2px 10px; border-radius:10px; }
+  .legend span.note { padding:2px 0; color:var(--muted); }
+  th i.info { font-style:normal; font-weight:400; color:var(--muted); cursor:help; }
   /* 彈窗 */
   dialog { border:1px solid var(--line-2); border-radius:14px; padding:0; width:min(640px, calc(100vw - 32px));
            max-height:calc(100vh - 32px); background:var(--card); color:var(--ink); box-shadow:var(--dialog-shadow); }
@@ -202,18 +205,21 @@ BASE = """
 <nav><div>
   <span class="brand">Vantage Roster Situation</span>
   {% if current_user %}
-  <a href="{{ url_for('index') }}" {% if request.endpoint == 'index' %}class="on"{% endif %}>排班總覽</a>
+  <a href="{{ url_for('roster.index') }}" {% if request.endpoint == 'roster.index' %}class="on"{% endif %}>排班總覽</a>
   {% endif %}
   {% if can_leave %}
-  <a href="{{ url_for('leave') }}" {% if request.endpoint == 'leave' %}class="on"{% endif %}>請假{% if nav_pending_leave %}<span class="count">{{ nav_pending_leave }}</span>{% endif %}</a>
+  <a href="{{ url_for('leave.leave') }}" {% if request.endpoint == 'leave.leave' %}class="on"{% endif %}>請假{% if nav_pending_leave %}<span class="count">{{ nav_pending_leave }}</span>{% endif %}</a>
+  {% endif %}
+  {% if can_overtime %}
+  <a href="{{ url_for('overtime.overtime') }}" {% if request.endpoint == 'overtime.overtime' %}class="on"{% endif %}>加班{% if nav_pending_overtime %}<span class="count">{{ nav_pending_overtime }}</span>{% endif %}</a>
   {% endif %}
   {% for k, label in nav_dims %}
-  <a href="{{ url_for('dim_list', kind=k) }}"
+  <a href="{{ url_for('dim.dim_list', kind=k) }}"
      {% if request.view_args and request.view_args.get('kind') == k %}class="on"{% endif %}>{{ label }}</a>
   {% endfor %}
   <button type="button" class="theme" id="theme_toggle"></button>
   {% if current_user %}
-  <form class="who" method="post" action="{{ url_for('logout') }}">
+  <form class="who" method="post" action="{{ url_for('auth.logout') }}">
     <span>{{ current_user.full_name }} · {{ current_user.role or '—' }}</span>
     {% if token_exp %}<span class="exp" id="token_exp" data-exp="{{ token_exp }}"></span>{% endif %}
     <button type="submit">登出</button>
@@ -275,10 +281,12 @@ ROSTER = """
           <option {% if selected == a %}selected{% endif %}>{{ a }}</option>
           {% endfor %}
 {% endmacro %}
+{% block title %}排班總覽 · Vantage Roster Situation{% endblock %}
 {% block content %}
-  <h1>Vantage Roster Situation</h1>
-  {% if nav_pending_leave %}<div class="banner info">有 {{ nav_pending_leave }} 張請假申請等你審核，<a href="{{ url_for('leave') }}">前往審核</a></div>{% endif %}
-  <p class="sub">每人每天的排班、請假與加班狀況。上班 / 請假 / 加班天數為所選年度（或月份）小計（半天以 0.5 計）。</p>
+  <h1>排班總覽</h1>
+  <p class="sub">查看每個人每天的班、請假與加班；點小計數字可以看逐日明細。</p>
+  {% if nav_pending_leave %}<div class="banner info">有 {{ nav_pending_leave }} 張請假申請等你審核，<a href="{{ url_for('leave.leave') }}">前往審核</a></div>{% endif %}
+  {% if nav_pending_overtime %}<div class="banner info">有 {{ nav_pending_overtime }} 張加班申請等你審核，<a href="{{ url_for('overtime.overtime') }}">前往審核</a></div>{% endif %}
 
   <div class="card">
     <form class="head" method="get">
@@ -291,19 +299,20 @@ ROSTER = """
           <option value="">全年</option>
           {% for m in range(1, 13) %}<option value="{{ m }}" {% if m == pivot.month %}selected{% endif %}>{{ m }} 月</option>{% endfor %}
         </select>
-        <a class="btn secondary" href="{{ url_for('export_roster', year=pivot.year, month=pivot.month) }}">匯出檔案</a>
+        <a class="btn secondary" href="{{ url_for('roster.export_roster', year=pivot.year, month=pivot.month) }}">匯出檔案</a>
       </div>
     </form>
     <div class="legend">
       {% for code, label in situation_labels %}<span class="s-{{ code }}">{{ label }}</span>{% endfor %}
+      <span class="note">「+OT」：當天有已核准的加班　虛線框：待審核，不計入小計</span>
     </div>
     {% if pivot.rows %}
     <div class="pivot"><table>
       <thead><tr>
         <th class="k k1">team</th><th class="k k2">office_code</th><th class="k k3">full_name</th>
-        <th class="k t1 drill" data-kind="work" title="點擊看所有人的逐日明細">上班</th>
-        <th class="k t2 drill" data-kind="leave" title="點擊看所有人的逐日明細">請假</th>
-        <th class="k t3 drill" data-kind="ot" title="點擊看所有人的逐日明細">加班</th>
+        <th class="k t1 drill" data-kind="work" title="所選年度或月份的天數小計，半天算 0.5。點擊看所有人的逐日明細">上班 <i class="info">ⓘ</i></th>
+        <th class="k t2 drill" data-kind="leave" title="所選年度或月份的天數小計，半天算 0.5。點擊看所有人的逐日明細">請假 <i class="info">ⓘ</i></th>
+        <th class="k t3 drill" data-kind="ot" title="所選年度或月份的天數小計，半天算 0.5；加班依時數換算，{{ ot_full_day_hours }} 小時 = 1 天，另外顯示時數。點擊看所有人的逐日明細">加班 <i class="info">ⓘ</i></th>
         {% for c in pivot.columns %}<th {% if c.weekend %}class="wkend"{% endif %}>{{ c.label }}<small>{{ c.weekday }}</small></th>{% endfor %}
       </tr></thead>
       <tbody>
@@ -312,7 +321,7 @@ ROSTER = """
         <td class="k k1">{{ r.team }}</td><td class="k k2">{{ r.office_code }}</td><td class="k k3">{{ r.full_name }}</td>
         <td class="k t1 drill" data-kind="work" data-emp="{{ r.employee_id }}">{{ r.work }}</td>
         <td class="k t2 drill" data-kind="leave" data-emp="{{ r.employee_id }}">{{ r.leave }}</td>
-        <td class="k t3 drill" data-kind="ot" data-emp="{{ r.employee_id }}">{{ r.ot }}</td>
+        <td class="k t3 drill" data-kind="ot" data-emp="{{ r.employee_id }}">{{ r.ot }}{% if r.ot_hours %}<small> · {{ r.ot_hours }}h</small>{% endif %}</td>
         {% for v, s in r.cells %}<td class="{% if s %}s-{{ s }}{% elif pivot.columns[loop.index0].weekend %}wkend empty{% else %}empty{% endif %}">{{ v or '·' }}</td>{% endfor %}
       </tr>
       {% endfor %}
@@ -321,11 +330,10 @@ ROSTER = """
     {% else %}
     <p class="sub">{{ pivot.year }} 年{% if pivot.month %} {{ pivot.month }} 月{% endif %}還沒有排班資料。</p>
     {% endif %}
-    {% if pivot.rows %}<div class="hint">點「上班 / 請假 / 加班」的數字看該員工的逐日明細；點欄位標題看所有人的明細。</div>
-    {% endif %}
   </div>
 
   {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+  {% if msg %}<div class="banner {% if not msg_error %}info{% endif %}">{{ msg }}</div>{% endif %}
 
   {% if can('USER_CREATE') %}
   <form class="card" method="post">
@@ -364,7 +372,6 @@ ROSTER = """
         <input type="text" id="remarks" name="remarks" value="{{ form.remarks or '' }}" placeholder="例如：與 EMP0005 換班">
       </div>
     </div>
-    <label class="check"><input type="checkbox" name="is_ot" {% if form.is_ot %}checked{% endif %}> 這是加班</label>
     <label class="check"><input type="checkbox" name="skip_non_working" {% if form.skip_non_working %}checked{% endif %}>
       日期區間內遇到休息日或國定假日時略過（上班與請假班別適用）</label>
     <button type="submit">送出</button>
@@ -382,7 +389,7 @@ ROSTER = """
         <td>{{ r.row.weekday if r.row else '' }}</td>
         <td><span class="tag {{ r.action }}">{{ {'created':'新增','updated':'更新','skipped':'略過','error':'失敗'}[r.action] }}</span></td>
         <td>{{ r.row.day_type if r.row else '' }}{% if r.row and r.row.holiday_name %} · {{ r.row.holiday_name }}{% endif %}</td>
-        <td>{{ r.row.shift_code if r.row else '' }}{% if r.row and r.row.is_ot %} (OT){% endif %}</td>
+        <td>{{ r.row.shift_code if r.row else '' }}</td>
         <td>{% if r.row and r.row.planned_start_local %}{{ r.row.planned_start_local[11:] }} → {{ r.row.planned_end_local[11:] }}{% endif %}</td>
         <td>{{ r.row.planned_hours if r.row else '' }}</td>
         <td class="msg {% if r.action != 'skipped' %}flag{% endif %}">{{ r.message }}</td>
@@ -418,14 +425,14 @@ ROSTER = """
     {% if recent %}
     <div class="scroll"><table>
       <tr>{% if can('USER_EDIT') %}<th></th>{% endif %}<th>roster_key</th><th>姓名</th><th>星期</th><th>班別</th><th>狀態</th><th>日別</th><th>工時</th>
-          <th>工作天</th><th>請假</th><th>加班</th><th>版本</th><th>updatetime (UTC)</th><th>檢查</th></tr>
+          <th>工作天</th><th>請假</th><th>版本</th><th>updatetime (UTC)</th><th>檢查</th></tr>
       {% for r in recent %}
       <tr>
         {% if can('USER_EDIT') %}<td><button type="button" class="link" data-edit='{{ r|edit_payload|tojson }}'>修改</button></td>{% endif %}
         <td>{{ r.roster_key }}</td><td>{{ r.full_name }}</td><td>{{ r.weekday }}</td>
-        <td>{{ r.shift_code }}{% if r.is_ot %} (OT){% endif %}</td><td>{{ r.status_group }}</td>
+        <td>{{ r.shift_code }}</td><td>{{ r.status_group }}</td>
         <td>{{ r.day_type }}</td><td>{{ r.planned_hours }}</td><td>{{ r.work_fraction }}</td>
-        <td>{{ r.leave_fraction }}</td><td>{{ r.ot_fraction }}</td><td>{{ r.roster_version }}</td>
+        <td>{{ r.leave_fraction }}</td><td>{{ r.roster_version }}</td>
         <td>{{ r.updated_at|utc_text }}</td>
         <td class="msg flag">{{ r.check_flag or '' }}</td>
       </tr>
@@ -434,6 +441,39 @@ ROSTER = """
     <div class="hint">最多顯示 {{ recent_limit }} 筆，依日期由新到舊。</div>
     {% else %}
     <p class="sub">查無資料。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="head">
+      <h2>加班紀錄（已核准）</h2>
+      {% if can_overtime %}<a class="btn secondary" href="{{ url_for('overtime.overtime') }}">申請加班</a>{% endif %}
+    </div>
+    {% if recent_ot %}
+    <div class="scroll"><table>
+      <tr><th>日期</th><th>星期</th><th>日別</th><th>方式</th><th>時間 / 班別</th><th>時數</th><th>天數</th><th>申請單</th>
+          <th>updatetime (UTC)</th><th>備註 / 檢查</th>{% if can('USER_EDIT') %}<th></th>{% endif %}</tr>
+      {% for o in recent_ot %}
+      <tr>
+        <td>{{ o.overtime_date }}</td><td>{{ o.weekday }}</td>
+        <td>{{ o.day_type }}{% if o.holiday_name %} · {{ o.holiday_name }}{% endif %}</td>
+        <td>{{ '整天 / 半天' if o.shift_code else '時間' }}</td>
+        <td>{% if o.shift_code %}{{ o.shift_code }} · {{ o.roster_display }}{% else %}{{ o.start_local[11:] }} → {{ o.end_local[11:] }}{% endif %}</td>
+        <td>{{ o.ot_hours if o.ot_hours is not none else '' }}</td><td>{{ o.ot_fraction|days }}</td>
+        <td>{{ o.overtime_request_id or '舊資料' }}</td>
+        <td>{{ o.updated_at|utc_text }}</td>
+        <td class="msg">{{ o.remarks or '' }}{% if o.check_flag %}<span class="flag">{{ (' ；' if o.remarks else '') ~ o.check_flag }}</span>{% endif %}</td>
+        {% if can('USER_EDIT') %}<td>{% if not o.overtime_request_id %}
+          <form method="post" action="{{ url_for('overtime.overtime_record_delete', overtime_key=o.overtime_key) }}"
+                onsubmit="return confirm('確定刪除 {{ o.overtime_date }} 的加班？')">
+            <button type="submit" class="link">刪除</button>
+          </form>{% endif %}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">依上方查詢條件，最多顯示 {{ recent_limit }} 筆。由申請單核准的加班如需取消，請聯絡主管在加班頁取消。</div>
+    {% else %}
+    <p class="sub">查無加班紀錄。</p>
     {% endif %}
   </div>
 
@@ -468,7 +508,6 @@ ROSTER = """
           <input type="text" id="dlg_remarks" name="remarks">
         </div>
       </div>
-      <label class="check"><input type="checkbox" name="is_ot"> 這是加班</label>
       <div class="actions">
         <button type="button" class="secondary" data-close>取消</button>
         <button type="submit">儲存修改</button>
@@ -497,7 +536,7 @@ ROSTER = """
     async function openDetail(kind, emp) {
       const params = new URLSearchParams({kind, year: {{ pivot.year }}{% if pivot.month %}, month: {{ pivot.month }}{% endif %}});
       if (emp) params.set('employee_id', emp);
-      const res = await fetch(`{{ url_for('api_roster_detail') }}?${params}`);
+      const res = await fetch(`{{ url_for('roster.api_roster_detail') }}?${params}`);
       const d = await res.json();
       q('title').textContent = d.ok ? d.title : (d.error || '讀取失敗');
       q('cols').replaceChildren(...(d.columns || []).map(c => Object.assign(document.createElement('th'), {textContent: c})));
@@ -553,7 +592,6 @@ ROSTER = """
     f.shift_code.value = d.shift_code;
     f.leave_approval_status.value = d.leave_approval_status || '';
     f.remarks.value = d.remarks || '';
-    f.is_ot.checked = !!d.is_ot;
     show('edit_key', d.edit_key);
     show('who', `${d.employee_id} · ${d.full_name || ''}`);
     show('start_date', `${d.start_date} (${d.weekday || ''})`);
@@ -587,8 +625,8 @@ DIM_LIST = """
     <div class="head">
       <h2>資料列表</h2>
       <div class="tools">
-        {% if can('USER_CREATE') %}<a class="btn" href="{{ url_for('dim_edit', kind=kind) }}">新增{{ meta.label }}</a>{% endif %}
-        <a class="btn secondary" href="{{ url_for('dim_export', kind=kind) }}">匯出檔案</a>
+        {% if can('USER_CREATE') %}<a class="btn" href="{{ url_for('dim.dim_edit', kind=kind) }}">新增{{ meta.label }}</a>{% endif %}
+        <a class="btn secondary" href="{{ url_for('dim.dim_export', kind=kind) }}">匯出檔案</a>
       </div>
     </div>
     {% if rows %}
@@ -597,7 +635,7 @@ DIM_LIST = """
       {% for r in rows %}
       <tr>
         {% for c in meta.list_cols %}<td>{% if c in ('created_at', 'updated_at') %}{{ r[c]|utc_text }}{% else %}{{ '' if r[c] is none else r[c] }}{% endif %}</td>{% endfor %}
-        <td><a href="{{ url_for('dim_edit', kind=kind, key=r[meta.pk]) }}">編輯</a></td>
+        <td><a href="{{ url_for('dim.dim_edit', kind=kind, key=r[meta.pk]) }}">編輯</a></td>
       </tr>
       {% endfor %}
     </table></div>
@@ -654,6 +692,16 @@ DIM_EDIT = """
         </div>
       {% elif f.type == 'bool' %}
         <div><label class="check"><input type="checkbox" name="{{ f.name }}" {% if v and v != '0' %}checked{% endif %}> {{ f.name }}</label></div>
+      {% elif f.type == 'time' %}
+        <div>
+          <label for="{{ f.name }}">{{ f.name }}</label>
+          <select id="{{ f.name }}" name="{{ f.name }}" {% if f.required %}required{% endif %}>
+            <option value="">—</option>
+            {% if v and v not in time_options %}<option value="{{ v }}" selected>{{ v }}</option>{% endif %}
+            {% for t in time_options %}<option value="{{ t }}" {% if v == t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+          </select>
+          <div class="hint">每 {{ time_step }} 分鐘一格；下班早於上班視為跨日</div>
+        </div>
       {% elif f.type == 'select' %}
         <div>
           <label for="{{ f.name }}">{{ f.name }}</label>
@@ -684,11 +732,11 @@ DIM_EDIT = """
     {% endif %}
     </div>
     <button type="submit">儲存</button>
-    <a class="back" href="{{ url_for('dim_list', kind=kind) }}">返回列表</a>
+    <a class="back" href="{{ url_for('dim.dim_list', kind=kind) }}">返回列表</a>
   </form>
 
   {% if key and can('USER_DELETE') %}
-  <form method="post" action="{{ url_for('dim_delete', kind=kind) }}" onsubmit="return confirm('確定刪除這筆資料？')">
+  <form method="post" action="{{ url_for('dim.dim_delete', kind=kind) }}" onsubmit="return confirm('確定刪除這筆資料？')">
     <input type="hidden" name="key" value="{{ key }}">
     <button type="submit" class="danger">刪除</button>
   </form>
@@ -734,7 +782,7 @@ LEAVE = """
         <td class="msg">{{ q.reason or '' }}</td>
         <td>已核准 {{ q.team_off }} 人 · 待審 {{ q.team_pending }} 人</td>
         <td>
-          <form class="inline" method="post" action="{{ url_for('leave_decide', request_id=q.request_id) }}">
+          <form class="inline" method="post" action="{{ url_for('leave.leave_decide', request_id=q.request_id) }}">
             <input type="text" name="decision_note" placeholder="審核意見（選填）">
             <button name="decision" value="approve">核准</button>
             <button name="decision" value="reject" class="danger">駁回</button>
@@ -753,9 +801,9 @@ LEAVE = """
     <div class="head">
       <h2>請假月曆：{{ cal.year }} 年 {{ cal.month }} 月</h2>
       <div class="tools">
-        <a class="btn secondary" href="{{ url_for('leave', cal=cal.prev) }}">‹ 上個月</a>
-        <a class="btn secondary" href="{{ url_for('leave') }}">本月</a>
-        <a class="btn secondary" href="{{ url_for('leave', cal=cal.next) }}">下個月 ›</a>
+        <a class="btn secondary" href="{{ url_for('leave.leave', cal=cal.prev) }}">‹ 上個月</a>
+        <a class="btn secondary" href="{{ url_for('leave.leave') }}">本月</a>
+        <a class="btn secondary" href="{{ url_for('leave.leave', cal=cal.next) }}">下個月 ›</a>
       </div>
     </div>
     <div class="cal">
@@ -813,7 +861,7 @@ LEAVE = """
       <div>
         <label for="leave_end">結束日期</label>
         <input type="date" id="leave_end" name="end_date" value="{{ form.end_date }}">
-        <div class="hint">只請一天可留空；半天 / 部分請假只能請單日</div>
+        <div class="hint">只請一天可留空；半天 / 部分請假只能請單日，而且當天要已經排班，請假時段依當天的班計算</div>
       </div>
       <div>
         <label for="leave_reason">原因</label>
@@ -840,7 +888,7 @@ LEAVE = """
         <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Pending' %}
-          <form method="post" action="{{ url_for('leave_cancel', request_id=q.request_id) }}" onsubmit="return confirm('確定撤回 {{ q.request_id }}？')">
+          <form method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}" onsubmit="return confirm('確定撤回 {{ q.request_id }}？')">
             <button type="submit" class="link">撤回</button>
           </form>{% endif %}</td>
       </tr>
@@ -857,7 +905,7 @@ LEAVE = """
   <div class="card">
     <div class="head">
       <h2>審核紀錄</h2>
-      <a class="btn secondary" href="{{ url_for('export_leave_history') }}">匯出檔案</a>
+      <a class="btn secondary" href="{{ url_for('leave.export_leave_history') }}">匯出檔案</a>
     </div>
     {% if history %}
     <div class="scroll"><table>
@@ -873,7 +921,7 @@ LEAVE = """
         <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Approved' %}
-          <form class="inline" method="post" action="{{ url_for('leave_cancel', request_id=q.request_id) }}"
+          <form class="inline" method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}"
                 onsubmit="return confirm('取消後會把班表還原為預設班別，確定取消 {{ q.request_id }}？')">
             <input type="text" name="note" placeholder="取消原因（選填）">
             <button type="submit" class="danger">取消</button>
@@ -925,13 +973,237 @@ LEAVE = """
                                      end_date: f.end_date.value});
       const id = ++seq;
       try {
-        const d = await (await fetch(`{{ url_for('api_leave_preview') }}?${q}`)).json();
+        const d = await (await fetch(`{{ url_for('leave.api_leave_preview') }}?${q}`)).json();
         if (id !== seq) return;
         out.className = d.ok ? 'hint' : 'hint flag';
-        out.textContent = d.ok ? `共 ${d.days} 天（略過休息日與國定假日）：${d.dates.join('、')}` : d.error;
+        const periods = (d.periods || []).map(p => `當天的班：${p.shift}；請假 ${p.leave}`).join('、');
+        out.textContent = d.ok ? `共 ${d.days} 天（略過休息日與國定假日）：${d.dates.join('、')}` + (periods ? `。${periods}` : '')
+                               : d.error;
       } catch { if (id === seq) out.textContent = ''; }
     }
     ['shift_code', 'start_date', 'end_date'].forEach(n => f[n].addEventListener('change', preview));
+    preview();
+  })();
+</script>
+{% endif %}
+{% endblock %}
+"""
+
+OVERTIME = """
+{% extends "base.html" %}
+{% block title %}加班 · Vantage Roster Situation{% endblock %}
+{% macro status_tag(st) %}<span class="tag st-{{ st }}">{{ leave_status_labels[st] }}</span>{% endmacro %}
+{% macro period(q) %}{{ q.start_date }}{% if q.end_date != q.start_date %} → {{ q.end_date }}{% endif %}{% endmacro %}
+{% macro how(q) %}{% if q.shift_code %}{{ q.shift_code }} · {{ q.roster_display }}{% else %}{{ q.start_time }} → {{ q.end_time }}{% endif %}{% endmacro %}
+{% macro amount(q) %}{{ q.days|days }} 天{% if q.hours %}<div class="hint">{{ q.hours|days }} 小時</div>{% endif %}{% endmacro %}
+{% block content %}
+  <h1>加班</h1>
+  <p class="sub">送出申請後由主管審核，核准後才寫入加班紀錄；加班和班表分開存，不會覆蓋當天的班。待審核的加班會在排班總覽以虛線框顯示，不計入加班天數。</p>
+  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+
+  {% if can('OT_APPROVE') %}
+  <div class="card">
+    <h2>待審核（{{ pending|length }}）</h2>
+    <p class="hint">列出主管欄位（parent_id）是你的員工送出的申請；最高主管的申請由其他有審核權限的人審。你自己的申請由你的主管審核，不會出現在這裡。</p>
+    {% if pending %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>原因</th><th>審核</th></tr>
+      {% for q in pending %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }} · {{ q.office_code }} / {{ q.team or '—' }}</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>
+          <form class="inline" method="post" action="{{ url_for('overtime.overtime_decide', request_id=q.request_id) }}">
+            <input type="text" name="decision_note" placeholder="審核意見（選填）">
+            <button name="decision" value="approve">核准</button>
+            <button name="decision" value="reject" class="danger">駁回</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">目前沒有待審核的申請。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can('OT_APPLY') %}
+  <form class="card" method="post" id="ot_form">
+    <h2>我的加班</h2>
+    {% if error %}<div class="banner">{{ error }}</div>{% endif %}
+    <div class="grid">
+      <div>
+        <label for="ot_start_date">開始日期</label>
+        <input type="date" id="ot_start_date" name="start_date" value="{{ form.start_date }}" required>
+      </div>
+      <div data-ot="unit">
+        <label for="ot_end_date">結束日期</label>
+        <input type="date" id="ot_end_date" name="end_date" value="{{ form.end_date or '' }}" data-optional>
+        <div class="hint">只申請一天可留空</div>
+      </div>
+      <div>
+        <label for="ot_mode">方式</label>
+        <select id="ot_mode" name="mode">
+          <option value="time" {% if form.mode != 'unit' %}selected{% endif %}>填時間（上班日提早上班 / 延後下班，一次一天）</option>
+          <option value="unit" {% if form.mode == 'unit' %}selected{% endif %}>整天 / 半天（沒有上班的日子，可多天）</option>
+        </select>
+      </div>
+      <div data-ot="time">
+        <label for="ot_start_time">開始時間</label>
+        <select id="ot_start_time" name="start_time" data-value="{{ form.start_time or '' }}"><option value="">請先選日期</option></select>
+        <div class="hint" id="ot_shift_hint"></div>
+      </div>
+      <div data-ot="time">
+        <label for="ot_end_time">結束時間</label>
+        <select id="ot_end_time" name="end_time" data-value="{{ form.end_time or '' }}"><option value="">請先選開始時間</option></select>
+        <div class="hint">至少 {{ ot_min_hours }} 小時、每 {{ time_step }} 分鐘一格；只列出不和你的班重疊的時段</div>
+      </div>
+      <div data-ot="unit">
+        <label for="ot_shift_code">加班班別</label>
+        <select id="ot_shift_code" name="shift_code">
+          <option value="">請選擇</option>
+          {% for s in ot_shifts %}<option value="{{ s.shift_code }}" {% if form.shift_code == s.shift_code %}selected{% endif %}>{{ s.shift_code }} · {{ s.shift_name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="ot_reason">原因</label>
+        <input type="text" id="ot_reason" name="reason" value="{{ form.reason or '' }}" placeholder="例如：月底結帳">
+      </div>
+    </div>
+    <div class="hint" id="ot_preview" aria-live="polite"></div>
+    <button type="submit">送出申請</button>
+  </form>
+
+  <div class="card">
+    <h2>我的申請紀錄</h2>
+    {% if mine %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>原因</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in mine %}
+      <tr>
+        <td>{{ q.request_id }}<div class="hint">{{ q.created_at|utc_text }} UTC</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td class="msg">{{ q.reason or '' }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Pending' %}
+          <form method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}" onsubmit="return confirm('確定撤回 {{ q.request_id }}？')">
+            <button type="submit" class="link">撤回</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <div class="hint">申請送出後不能修改，請撤回後重新申請；已核准的加班如需取消，請聯絡主管。最多顯示 {{ leave_limit }} 筆。</div>
+    {% else %}
+    <p class="sub">還沒有申請紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can('OT_APPROVE') %}
+  <div class="card">
+    <div class="head">
+      <h2>審核紀錄</h2>
+      <a class="btn secondary" href="{{ url_for('overtime.export_overtime_history') }}">匯出檔案</a>
+    </div>
+    {% if history %}
+    <div class="scroll"><table>
+      <tr><th>申請單</th><th>申請人</th><th>日期</th><th>時間 / 班別</th><th>加班量</th><th>狀態</th><th>審核人</th><th>審核意見</th><th></th></tr>
+      {% for q in history %}
+      <tr>
+        <td>{{ q.request_id }}</td>
+        <td>{{ q.full_name }}<div class="hint">{{ q.employee_id }}</div></td>
+        <td>{{ period(q) }}</td>
+        <td>{{ how(q) }}</td>
+        <td>{{ amount(q) }}</td>
+        <td>{{ status_tag(q.status) }}</td>
+        <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
+        <td class="msg">{{ q.decision_note or '' }}</td>
+        <td>{% if q.status == 'Approved' %}
+          <form class="inline" method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}"
+                onsubmit="return confirm('取消後會刪除這張單寫入的加班，確定取消 {{ q.request_id }}？')">
+            <input type="text" name="note" placeholder="取消原因（選填）">
+            <button type="submit" class="danger">取消</button>
+          </form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="sub">還沒有審核紀錄。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endblock %}
+{% block script %}
+{% if can('OT_APPLY') %}
+<script>
+  // 依方式切換「時間」或「加班班別」欄位，並即時預覽天數 / 時數（伺服器逐日檢查）
+  (() => {
+    const form = document.getElementById('ot_form');
+    const f = form.elements;
+    const out = document.getElementById('ot_preview');
+    const toggle = () => form.querySelectorAll('[data-ot]').forEach(el => {
+      const on = el.dataset.ot === f.mode.value;
+      el.style.display = on ? '' : 'none';
+      el.querySelectorAll('input, select').forEach(i => { i.disabled = !on; i.required = on && !('optional' in i.dataset); });
+    });
+    // 填時間：選日期後向伺服器取得可選的時段（依當天的班，避開上班時間），再依開始時間列出結束時間
+    const startSel = f.start_time, endSel = f.end_time, shiftHint = document.getElementById('ot_shift_hint');
+    let slots = [], slotSeq = 0;
+    const fill = (sel, items, empty) => {
+      const keep = sel.value || sel.dataset.value;
+      sel.replaceChildren(new Option(items.length ? '請選擇' : empty, ''),
+                          ...items.map(([value, label]) => new Option(label, value)));
+      sel.value = items.some(([v]) => v === keep) ? keep : '';
+      sel.dataset.value = '';
+    };
+    const fillEnds = () => {
+      const s = slots.find(x => x.value === startSel.value);
+      fill(endSel, s ? s.ends.map(e => [e.value, `${e.label}（${e.hours} 小時）`]) : [], '請先選開始時間');
+    };
+    async function loadSlots() {
+      if (f.mode.value !== 'time' || !f.start_date.value) { slots = []; fill(startSel, [], '請先選日期'); fillEnds(); return; }
+      const id = ++slotSeq;
+      const d = await (await fetch(`{{ url_for('overtime.api_overtime_slots') }}?date=${f.start_date.value}`)).json();
+      if (id !== slotSeq) return;
+      slots = d.ok ? d.starts : [];
+      shiftHint.className = d.ok ? 'hint' : 'hint flag';
+      shiftHint.textContent = !d.ok ? d.error : (d.shift ? `當天的班：${d.shift}` : '當天沒有排上班，可自由選擇時段');
+      fill(startSel, slots.map(x => [x.value, x.value]), d.ok ? '這天沒有可加班的時段' : '無法選擇');
+      fillEnds();
+      preview();
+    }
+    startSel.addEventListener('change', () => { fillEnds(); preview(); });
+
+    let seq = 0;
+    async function preview() {
+      const unit = f.mode.value === 'unit';
+      const ready = f.start_date.value && (unit ? f.shift_code.value : f.start_time.value && f.end_time.value);
+      if (!ready) { out.textContent = ''; return; }
+      const q = new URLSearchParams({mode: f.mode.value, start_date: f.start_date.value, end_date: f.end_date.value,
+                                     shift_code: unit ? f.shift_code.value : '',
+                                     start_time: unit ? '' : f.start_time.value, end_time: unit ? '' : f.end_time.value});
+      const id = ++seq;
+      try {
+        const d = await (await fetch(`{{ url_for('overtime.api_overtime_preview') }}?${q}`)).json();
+        if (id !== seq) return;
+        out.className = d.ok ? 'hint' : 'hint flag';
+        out.textContent = d.ok ? `共 ${d.days} 天${d.hours ? `（${d.hours} 小時）` : ''}：${d.dates.join('、')}` : d.error;
+      } catch { if (id === seq) out.textContent = ''; }
+    }
+    f.mode.addEventListener('change', () => { toggle(); loadSlots(); preview(); });
+    f.start_date.addEventListener('change', loadSlots);
+    ['start_date', 'end_date', 'end_time', 'shift_code'].forEach(n => f[n].addEventListener('change', preview));
+    toggle();
+    loadSlots();
     preview();
   })();
 </script>
@@ -964,7 +1236,7 @@ FORBIDDEN = """
   <div class="card">
     <h1>沒有權限</h1>
     <p class="sub">你的帳號沒有這項操作的權限，如有需要請聯絡主管。</p>
-    <a class="btn" href="{{ url_for('index') }}">回到排班總覽</a>
+    <a class="btn" href="{{ url_for('roster.index') }}">回到排班總覽</a>
   </div>
 {% endblock %}
 """
@@ -975,6 +1247,7 @@ TEMPLATES = {
     "forbidden.html": FORBIDDEN,
     "roster.html": ROSTER,
     "leave.html": LEAVE,
+    "overtime.html": OVERTIME,
     "dim_list.html": DIM_LIST,
     "dim_edit.html": DIM_EDIT,
 }
@@ -1012,6 +1285,7 @@ def pivot_to_view(pivot, totals, year, month=None):
         view["rows"].append({
             "team": team, "office_code": office, "full_name": name, "employee_id": employee_id,
             "work": days_text(t["work_fraction"]), "leave": days_text(t["leave_fraction"]), "ot": days_text(t["ot_fraction"]),
+            "ot_hours": days_text(t["ot_hours"]) if t["ot_hours"] else "",
             "cells": [(_str_or_none(v), _str_or_none(s)) for v, s in zip(cells, situation.loc[key])],
         })
     return view
@@ -1026,9 +1300,9 @@ def csv_safe(v):
 
 def pivot_export(view):
     """總覽 → CSV 欄位與資料列；待審核的請假加註（待審）。"""
-    columns = ["team", "office_code", "full_name", "上班", "請假", "加班"] + [
+    columns = ["team", "office_code", "full_name", "上班", "請假", "加班", "加班時數"] + [
         f"{c['date']} ({c['weekday']})" for c in view["columns"]]
-    rows = [[r["team"], r["office_code"], r["full_name"], r["work"], r["leave"], r["ot"]]
+    rows = [[r["team"], r["office_code"], r["full_name"], r["work"], r["leave"], r["ot"], r["ot_hours"]]
             + [(f"{v}（待審）" if s == "PENDING" else v) or "" for v, s in r["cells"]]
             for r in view["rows"]]
     return columns, rows
@@ -1051,21 +1325,24 @@ DETAIL_LABELS = {"work": "上班", "leave": "請假", "ot": "加班"}
 def detail_view(kind, rows, title, all_people):
     """逐日明細彈窗的欄位與資料（JSON）。all_people 時多一欄姓名。"""
     columns = (["姓名"] if all_people else []) + ["日期", "星期", "日別", "班別", "時間", "工時", "天數"]
-    columns += {"leave": ["狀態", "申請單"], "ot": ["標記加班"]}.get(kind, []) + ["備註 / 檢查"]
+    columns += {"leave": ["狀態", "申請單"], "ot": ["方式", "申請單"]}.get(kind, []) + ["備註 / 檢查"]
     out, total = [], 0
     for r in rows:
         time = (f"{r['planned_start_local'][11:]} → {r['planned_end_local'][11:]}"
                 if r.get("planned_start_local") else "")
+        if r.get("leave_period"):          # 非全天假：請假時段 + 剩下的上班時段
+            time = f"請假 {r['leave_period']}" + (f"（上班 {time}）" if time else "")
         day_type = r["day_type"] + (f" · {r['holiday_name']}" if r.get("holiday_name") else "")
         cells = ([r["name"]] if all_people else []) + [
-            r["roster_date"], r["weekday"], day_type, f"{r['shift_code']} · {r['roster_display'] or ''}",
+            r["roster_date"], r["weekday"], day_type,
+            f"{r['shift_code']} · {r['roster_display'] or ''}" if r.get("shift_code") else "—",
             time, days_text(r["planned_hours"]) if r.get("planned_hours") else "",
             "0（待審，不計入）" if r["pending"] else days_text(r["days"])]
         if kind == "leave":
             cells += ["待審核" if r["pending"] else (r["leave_approval_status"] or "—"),
                       r.get("leave_request_id") or "手動輸入"]
         elif kind == "ot":
-            cells += ["是" if r["is_ot"] else "OT 班別"]
+            cells += ["整天 / 半天" if r.get("shift_code") else "時間", r.get("request_id") or "舊資料"]
         cells.append("；".join(x for x in (r.get("remarks"), r.get("check_flag")) if x))
         total += 0 if r["pending"] else (r["days"] or 0)
         out.append({"cells": cells, "pending": r["pending"]})
@@ -1141,7 +1418,6 @@ def parse_submit_form(f):
         "end_date": f.get("end_date"),
         "leave_approval_status": f.get("leave_approval_status") or None,
         "remarks": (f.get("remarks") or "").strip() or None,
-        "is_ot": "is_ot" in f,
         "skip_non_working": "skip_non_working" in f,
         "edit_key": f.get("edit_key") or None,
     }
@@ -1158,11 +1434,10 @@ def edit_payload(row, overrides=None):
         "shift_code": row["shift_code"],
         "leave_approval_status": row["leave_approval_status"],
         "remarks": row["remarks"],
-        "is_ot": bool(row["is_ot"]),
         "roster_version": row["roster_version"],
         "updatetime": utc_text(row["updated_at"]),
     }
-    for k in ("shift_code", "leave_approval_status", "remarks", "is_ot"):
+    for k in ("shift_code", "leave_approval_status", "remarks"):
         if overrides and k in overrides:
             payload[k] = overrides[k]
     return payload
@@ -1175,14 +1450,49 @@ def parse_view_filter(args):
 
 def parse_api_payload(b):
     """把 JSON 請求轉成 submit_range 的參數。缺欄位丟 KeyError，日期格式錯丟 ValueError。"""
+    if b.get("is_ot"):
+        raise ValueError("加班請改用 POST /api/overtime，不會覆蓋當天的班")
     start = parse_date(b.get("start_date"))
     return {
         "employee_id": b["employee_id"],
         "shift_code": b["shift_code"],
         "start_date": start,
         "end_date": parse_date(b.get("end_date")) or start,
-        "is_ot": bool(b.get("is_ot")),
         "leave_approval_status": b.get("leave_approval_status"),
         "remarks": b.get("remarks"),
         "skip_non_working": b.get("skip_non_working", True),
     }
+
+
+def default_overtime_form():
+    return {"start_date": dt.date.today().isoformat(), "end_date": "", "mode": "time",
+            "start_time": "", "end_time": "", "shift_code": "", "reason": ""}
+
+
+def parse_overtime_form(f):
+    """加班申請的表單 / JSON → create_overtime_request 的參數；方式決定用時間或加班班別。
+    raw 保留原字串，供驗證失敗時填回表單。"""
+    unit = f.get("mode") == "unit" if f.get("mode") else bool(f.get("shift_code"))
+    start = parse_date(f.get("start_date"))
+    return {
+        "start_date": start,
+        "end_date": parse_date(f.get("end_date")) or start,
+        "shift_code": (f.get("shift_code") or None) if unit else None,
+        "start_time": None if unit else (f.get("start_time") or None),
+        "end_time": None if unit else (f.get("end_time") or None),
+        "reason": (f.get("reason") or "").strip() or None,
+        "raw": {k: f.get(k) or "" for k in ("start_date", "end_date", "start_time", "end_time", "shift_code", "reason")}
+               | {"mode": "unit" if unit else "time"},
+    }
+
+
+def overtime_export(requests, status_labels):
+    columns = ["request_id", "employee_id", "full_name", "team", "office_code", "start_date", "end_date",
+               "shift_code", "start_time", "end_time", "days", "hours", "reason", "status", "approver_id",
+               "approver_name", "decided_at (UTC)", "decision_note", "created_at (UTC)"]
+    rows = [[q["request_id"], q["employee_id"], q["full_name"], q["team"], q["office_code"], q["start_date"],
+             q["end_date"], q["shift_code"], q["start_time"], q["end_time"], days_text(q["days"]),
+             days_text(q["hours"]) if q["hours"] else "", q["reason"], status_labels.get(q["status"], q["status"]),
+             q["approver_id"], q["approver_name"], utc_text(q["decided_at"]), q["decision_note"],
+             utc_text(q["created_at"])] for q in requests]
+    return columns, rows

@@ -14,24 +14,24 @@ def _env_bool(name, default):
     return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 
-# =====================================================================
-# 執行環境
-# =====================================================================
-DB_PATH = os.environ.get("ROSTER_DB_PATH", os.path.join(BASE_DIR, "roster.db"))   # 環境變數
-HOST = os.environ.get("ROSTER_HOST", "127.0.0.1")                                 # 環境變數
-PORT = int(os.environ.get("ROSTER_PORT", "5000"))                                 # 環境變數
-DEBUG = _env_bool("ROSTER_DEBUG", True)                                           # 環境變數
 
-# =====================================================================
+# 執行環境
+DB_PATH = os.environ.get("ROSTER_DB_PATH", os.path.join(BASE_DIR, "roster.db"))   
+HOST = os.environ.get("ROSTER_HOST", "127.0.0.1")                                
+PORT = int(os.environ.get("ROSTER_PORT", "5000"))                                 
+DEBUG = _env_bool("ROSTER_DEBUG", True)                                          
+
+
 # 排班規則
-# =====================================================================
 MIN_REST_HOURS = 11          # 兩班之間最少休息時數
 MAX_RANGE_DAYS = 62          # 一次最多提交幾天
-OT_FULL_DAY_HOURS = 8        # 標記加班時，工時達到幾小時算 1 天（未達算 0.5 天）
+OT_FULL_DAY_HOURS = 8        # 時間制加班：時數 ÷ 此值 = 加班天數（最多 1 天）
+OT_MIN_HOURS = 1             # 時間制加班：一次至少幾小時
+OT_MAX_HOURS = 12            # 時間制加班：一次最多幾小時
+TIME_STEP_MINUTES = 30       # 加班與班別主檔的時間選單間隔（分鐘）
 
-# =====================================================================
+
 # 代碼與選項（資料表 CHECK 限制、下拉選單共用）
-# =====================================================================
 OFFICE_TZ = {
     "TW": "Asia/Taipei",
     "MY": "Asia/Kuala_Lumpur",
@@ -58,21 +58,21 @@ LEAVE_REQUEST_STATUSES = {"Pending": "待審核", "Approved": "已核准", "Reje
 
 # 年度總覽的狀態分類與圖例（順序即圖例順序）
 SITUATION_LABELS = [("SHIFT", "上班"), ("LEAVE", "請假"), ("OT", "加班"),
-                    ("OFF", "休息 / 國定假日"), ("ACTIVITY", "公務活動"), ("PENDING", "請假（待審核）")]
+                    ("OFF", "休息 / 國定假日"), ("ACTIVITY", "公務活動"), ("PENDING", "請假（待審核）"),
+                    ("OT_PENDING", "加班（待審核）")]
 
-# =====================================================================
+
 # 帳號與權限
-# =====================================================================
 # LEAVE_APPLY：申請 / 撤回自己的請假；LEAVE_APPROVE：審核請假（由申請人的主管 parent_id 審核）
-PERMISSIONS = ["USER_VIEW", "USER_CREATE", "USER_EDIT", "USER_DELETE", "LEAVE_APPLY", "LEAVE_APPROVE"]
+# OT_APPLY：申請 / 撤回自己的加班；OT_APPROVE：審核加班（同樣由申請人的主管審核）
+PERMISSIONS = ["USER_VIEW", "USER_CREATE", "USER_EDIT", "USER_DELETE", "LEAVE_APPLY", "LEAVE_APPROVE",
+               "OT_APPLY", "OT_APPROVE"]
 AGENT_ROLE = "Agent"
-AGENT_PERMISSIONS = ["USER_VIEW", "USER_CREATE", "LEAVE_APPLY"]   # Agent 預設權限；其他角色預設 PERMISSIONS 全部
+AGENT_PERMISSIONS = ["USER_VIEW", "USER_CREATE", "LEAVE_APPLY", "OT_APPLY"]   # Agent 預設權限；其他角色預設 PERMISSIONS 全部
 PASSWORD_MIN_LENGTH = 8
 
 
-# =====================================================================
 # JWT 驗證
-# =====================================================================
 def _load_secret_key():
     """優先用環境變數 ROSTER_SECRET_KEY；否則在專案資料夾產生 .secret_key 並沿用（重啟後 token 仍有效）。"""
     if os.environ.get("ROSTER_SECRET_KEY"):
@@ -92,22 +92,28 @@ JWT_COOKIE_NAME = "access_token"
 JWT_COOKIE_SECURE = _env_bool("ROSTER_COOKIE_SECURE", False)            # 環境變數；走 HTTPS 時設 true
 JWT_COOKIE_SAMESITE = "Lax"
 
-# =====================================================================
+
 # 備份：啟動時一次 + 每天 BACKUP_HOUR 點一次，複製成 backups/roster_YYYYMMDD_HHMMSS.db
 # 同一天只留最新一份，最多保留最近 BACKUP_KEEP_DAYS 天，舊的自動刪除
-# =====================================================================
 BACKUP_ENABLED = _env_bool("ROSTER_BACKUP", True)                                     # 環境變數
 BACKUP_DIR = os.environ.get("ROSTER_BACKUP_DIR", os.path.join(BASE_DIR, "backups"))   # 環境變數
 BACKUP_HOUR = 3              # 每日自動備份時間（伺服器當地時間，0–23）
 BACKUP_KEEP_DAYS = 14        # 保留幾天份
 
-# =====================================================================
+
+# 日誌：logs/YYYY-MM-DD/<email>/behavior.log（使用者行為）、debug.log（系統執行）
+# 沒有登入者的紀錄放 _anonymous/（未登入請求、登入失敗）與 _system/（啟動、備份）
+LOG_DIR = os.environ.get("ROSTER_LOG_DIR", os.path.join(BASE_DIR, "logs"))          # 環境變數
+LOG_STAGE = os.environ.get("ROSTER_STAGE", "local")                                 # 環境變數
+LOG_KEEP_DAYS = 30           # 保留幾天份，與每日備份同時清理
+
+
 # 介面
-# =====================================================================
 RECENT_ROSTER_LIMIT = 50     # 「查詢與修改」最多顯示筆數
 LEAVE_REQUEST_LIMIT = 50     # 請假頁每個列表最多顯示筆數
 PIVOT_YEARS_BEFORE = 2       # 年度總覽的年份選單：今年往前幾年
 PIVOT_YEARS_AFTER = 2        # 年度總覽的年份選單：今年往後幾年
+
 
 # 維度表頁面設定
 # pk_mode：manual = 新增時必填；auto = 留空自動編號；derived = 由其他欄位組成

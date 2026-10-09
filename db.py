@@ -12,7 +12,7 @@ import sqlite3
 from config import (
     AGENT_PERMISSIONS, AGENT_ROLE, APPROVAL_STATUSES, BACKUP_DIR, BACKUP_KEEP_DAYS, CATEGORY_LABEL, DAY_PORTIONS, DAY_TYPES, DB_PATH,
     DIM_TABLES, FIELD_CHOICES, LEAVE_REQUEST_LIMIT, LEAVE_REQUEST_STATUSES, MAX_RANGE_DAYS, MIN_REST_HOURS,
-    OFFICE_TZ, OT_FULL_DAY_HOURS,
+    OFFICE_TZ, OT_FULL_DAY_HOURS, OT_MAX_HOURS, OT_MIN_HOURS, TIME_STEP_MINUTES,
     PASSWORD_MIN_LENGTH, PERMISSIONS, RECENT_ROSTER_LIMIT, REST_PATTERN, SHIFT_TYPES, STATUS_GROUPS,
     TEAMS, WEEKDAY,
 )
@@ -66,7 +66,7 @@ def parse_permissions(value):
     return [p for p in PERMISSIONS if p in given]
 
 
-# 1. 資料表定義
+### 1. 資料表定義
 def _in(values):
     """['A', 'B'] → "'A','B'"，供 CHECK (... IN (...)) 使用。"""
     return ",".join("'" + v.replace("'", "''") + "'" for v in values)
@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS fact_roster (
     remarks               TEXT,
     check_flag            TEXT,
     leave_request_id      TEXT REFERENCES fact_leave_request(request_id),   -- 由請假申請核准寫入時才有值
+    base_shift_code       TEXT REFERENCES dim_shift_code(shift_code),       -- 請假那天原本排的上班班別（取消請假時還原）
     created_at            TEXT,
     updated_at            TEXT
 );
@@ -188,10 +189,55 @@ CREATE TABLE IF NOT EXISTS fact_leave_request (
 );
 CREATE INDEX IF NOT EXISTS ix_leave_emp_date ON fact_leave_request (employee_id, start_date, end_date);
 CREATE INDEX IF NOT EXISTS ix_leave_status ON fact_leave_request (status);
+
+CREATE TABLE IF NOT EXISTS fact_overtime_request (
+    request_id     TEXT PRIMARY KEY,            -- OTR-{{YYYYMMDD}}-{{NNN}}
+    employee_id    TEXT NOT NULL REFERENCES dim_employee(employee_id),
+    shift_code     TEXT REFERENCES dim_shift_code(shift_code),   -- 單位制（category = 'OT'）才有值
+    start_time     TEXT,                        -- 時間制才有值：'HH:MM' 當地時間，早於開始視為跨日
+    end_time       TEXT,
+    start_date     TEXT NOT NULL,               -- 'YYYY-MM-DD'
+    end_date       TEXT NOT NULL,
+    days           REAL NOT NULL,               -- 加班天數合計
+    hours          REAL,                        -- 時間制的時數合計
+    reason         TEXT,
+    status         TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ({_in(LEAVE_REQUEST_STATUSES)})),
+    approver_id    TEXT REFERENCES dim_employee(employee_id),
+    decided_at     TEXT,                        -- 核准 / 駁回時間（UTC）
+    decision_note  TEXT,
+    created_at     TEXT,                        -- 送出時間（UTC）
+    updated_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ot_request_emp_date ON fact_overtime_request (employee_id, start_date, end_date);
+CREATE INDEX IF NOT EXISTS ix_ot_request_status ON fact_overtime_request (status);
+
+CREATE TABLE IF NOT EXISTS fact_overtime (
+    overtime_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    overtime_key     TEXT NOT NULL UNIQUE,     -- {{employee_id}}-{{YYYYMMDD}}，一人一天最多一筆
+    overtime_date    TEXT NOT NULL,
+    employee_id      TEXT NOT NULL REFERENCES dim_employee(employee_id),
+    shift_code       TEXT REFERENCES dim_shift_code(shift_code),   -- 單位制（OT_FD / OT_H1 / OT_H2）才有值
+    start_local      TEXT,                     -- 時間制才有值：當地時間 YYYY-MM-DD HH:MM
+    end_local        TEXT,
+    start_utc        TEXT,
+    end_utc          TEXT,
+    ot_hours         REAL,                     -- 時間制的時數
+    ot_fraction      REAL NOT NULL,            -- 加班天數：時間制 = 時數 / OT_FULL_DAY_HOURS（最多 1）
+    weekday          TEXT,
+    day_type         TEXT CHECK (day_type IN ({_in(DAY_TYPES)})),
+    holiday_name     TEXT,
+    remarks          TEXT,
+    check_flag       TEXT,
+    overtime_request_id TEXT REFERENCES fact_overtime_request(request_id),   -- 由加班申請核准寫入；舊資料為 NULL
+    overtime_version INTEGER DEFAULT 1,
+    created_at       TEXT,
+    updated_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_overtime_emp_date ON fact_overtime (employee_id, overtime_date);
 """
 
 
-# 2. 初始資料
+### 2. 初始資料
 def _shift(code, disp, stype, start, end, brk=60, portion="FD", note=None):
     return (code, disp, f"Shift {disp}", "SHIFT", "Work", stype, start, end, brk, portion,
             1, 0, 0, None, 1, 0, note)
@@ -276,7 +322,7 @@ SEED_EMPLOYEES = [
 ]
 
 
-# 3. 維度表欄位型別（DIM_TABLES、FIELD_CHOICES 在 config.py）
+### 3. 維度表欄位型別（DIM_TABLES、FIELD_CHOICES 在 config.py）
 BOOL_FIELDS = {"is_paid", "deducts_leave_balance", "is_active", "is_substitute"}
 DATE_FIELDS = {"hire_date", "termination_date", "holiday_date"}
 TIME_FIELDS = {"start_time", "end_time"}
@@ -316,7 +362,7 @@ def _sql_default(dflt):
             return dflt
 
 
-# 4. RosterDB：包住一條連線，提供排班與維度表的讀寫
+### 4. RosterDB：包住一條連線，提供排班與維度表的讀寫
 class RosterDB:
     """用法：
         with RosterDB() as rdb:
@@ -341,9 +387,12 @@ class RosterDB:
 
     # ---------------- 初始化 ----------------
     def init_db(self):
+        """建立 / 升級資料表並寫入初始資料。回傳本次從舊班表搬到 fact_overtime 的 [(employee_id, 日期), ...]。"""
         conn = self.conn
         had_leave_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fact_leave_request'").fetchone()
+        had_ot_request_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fact_overtime_request'").fetchone()
         conn.executescript(SCHEMA)
         emp_cols = {c["name"] for c in conn.execute("PRAGMA table_info(dim_employee)")}
         if "manager_id" in emp_cols and "parent_id" not in emp_cols:     # 舊欄位改名
@@ -379,7 +428,8 @@ class RosterDB:
             "dim_employee": ("permission", "password_hash", "created_at", "updated_at"),
             "dim_shift_code": ("created_at", "updated_at"),
             "dim_holiday": ("created_at", "updated_at"),
-            "fact_roster": ("leave_request_id",),
+            "fact_roster": ("leave_request_id", "base_shift_code"),
+            "fact_overtime": ("overtime_request_id",),
         }
         now = _now()
         for table, wanted in new_cols.items():
@@ -391,11 +441,14 @@ class RosterDB:
             conn.execute(f"UPDATE {table} SET created_at = COALESCE(created_at, ?), "
                          f"updated_at = COALESCE(updated_at, created_at, ?) "
                          f"WHERE created_at IS NULL OR updated_at IS NULL", (now, now))
-        if not had_leave_table:
-            # 第一次加入請假功能：既有帳號補上請假權限（Agent 只能申請，其他角色可申請與審核）
+        # 第一次加入請假 / 加班審批：既有帳號補上權限（Agent 只能申請，其他角色可申請與審核）
+        for had, apply_perm, approve_perm in ((had_leave_table, "LEAVE_APPLY", "LEAVE_APPROVE"),
+                                              (had_ot_request_table, "OT_APPLY", "OT_APPROVE")):
+            if had:
+                continue
             for emp in conn.execute("SELECT employee_id, role, permission FROM dim_employee "
                                     "WHERE permission IS NOT NULL AND permission != ''").fetchall():
-                extra = ["LEAVE_APPLY"] if emp["role"] == AGENT_ROLE else ["LEAVE_APPLY", "LEAVE_APPROVE"]
+                extra = [apply_perm] if emp["role"] == AGENT_ROLE else [apply_perm, approve_perm]
                 perms = parse_permissions(emp["permission"].split(",") + extra)
                 conn.execute("UPDATE dim_employee SET permission = ? WHERE employee_id = ?",
                              (",".join(perms), emp["employee_id"]))
@@ -405,6 +458,7 @@ class RosterDB:
             (",".join(AGENT_PERMISSIONS), ",".join(PERMISSIONS)),
         )
         conn.commit()
+        return self.migrate_overtime()
 
     # ---------------- 帳號 ----------------
     def get_employee(self, employee_id):
@@ -440,78 +494,152 @@ class RosterDB:
         return emp["employee_id"]
 
     # ---------------- 排班 ----------------
-    def build_roster_row(self, employee_id, shift_code, roster_date, is_ot=False,
-                         leave_approval_status=None, remarks=None):
-        """讀主檔、計算衍生欄位，回傳 (row, flags)。不允許寫入時丟出 ValueError。"""
-        conn = self.conn
-        emp  = conn.execute("SELECT * FROM dim_employee WHERE employee_id = ?", (employee_id,)).fetchone()
-        sh   = conn.execute("SELECT * FROM dim_shift_code WHERE shift_code = ?", (shift_code,)).fetchone()
+    def _employee_on(self, employee_id, day):
+        """讀員工並確認 day 在在職期間內；回傳 (emp, 時區)。"""
+        emp = self.conn.execute("SELECT * FROM dim_employee WHERE employee_id = ?", (employee_id,)).fetchone()
         if emp is None:
             raise ValueError(f"找不到員工 {employee_id}")
-        if sh is None:
-            raise ValueError(f"找不到班別 {shift_code}")
-        if not sh["is_active"]:
-            raise ValueError(f"班別 {shift_code} 已停用")
-
-        ds = _iso(roster_date)
+        ds = _iso(day)
         if emp["hire_date"] and ds < emp["hire_date"]:
             raise ValueError(f"到職日為 {emp['hire_date']}，不可排 {ds}")
         if emp["termination_date"] and ds > emp["termination_date"]:
             raise ValueError(f"離職日為 {emp['termination_date']}，不可排 {ds}")
-
         tz_name = OFFICE_TZ.get(emp["office_code"])
         if tz_name is None:
             raise ValueError(f"辦公室 {emp['office_code']} 沒有設定時區")
-        tz = ZoneInfo(tz_name)
+        return emp, ZoneInfo(tz_name)
 
-        # 班別時間
-        start_m, end_m = _minutes(sh["start_time"]), _minutes(sh["end_time"])
-        start_local = end_local = start_utc = end_utc = None
-        planned_hours = 0.0
-        if start_m is not None and end_m is not None:
-            end_date = roster_date + dt.timedelta(days=1) if end_m <= start_m else roster_date
-            start_dt = dt.datetime.combine(roster_date, dt.time(start_m // 60, start_m % 60), tzinfo=tz)
-            end_dt = dt.datetime.combine(end_date, dt.time(end_m // 60, end_m % 60), tzinfo=tz)
-            duration_h = ((end_m - start_m) % 1440 or 1440) / 60
-            planned_hours = round(duration_h - (sh["break_minutes"] or 0) / 60, 2)
-            start_local = start_dt.strftime("%Y-%m-%d %H:%M")
-            end_local = end_dt.strftime("%Y-%m-%d %H:%M")
-            start_utc = start_dt.astimezone(dt.timezone.utc).isoformat()
-            end_utc = end_dt.astimezone(dt.timezone.utc).isoformat()
-
-        # 天數；標記加班時工時達 OT_FULL_DAY_HOURS 算 1 天，未達算 0.5 天
-        work_fraction = 0 if is_ot else (sh["work_fraction"] or 0)
-        if is_ot:
-            ot_fraction = (1 if planned_hours >= OT_FULL_DAY_HOURS else 0.5) if planned_hours > 0 else (sh["ot_fraction"] or 1)
-        else:
-            ot_fraction = sh["ot_fraction"] or 0
-
-        # 休息日與假日
-        wd = roster_date.isoweekday()
-        is_rest_day = wd in REST_PATTERN.get(emp["rest_pattern_code"] or "", ())
-        hol = conn.execute(
+    def _day_info(self, emp, day):
+        """日別：(day_type, 是否為休息模式的休息日, 國定假日名稱或 None)。"""
+        is_rest_day = day.isoweekday() in REST_PATTERN.get(emp["rest_pattern_code"] or "", ())
+        hol = self.conn.execute(
             "SELECT holiday_name FROM dim_holiday WHERE calendar_code = ? AND holiday_date = ?",
-            (emp["calendar_code"], ds),
+            (emp["calendar_code"], _iso(day)),
         ).fetchone()
         day_type = "PH" if hol else ("Rest Day" if is_rest_day else "Work Day")
+        return day_type, is_rest_day, hol["holiday_name"] if hol else None
+
+    @staticmethod
+    def _span_dt(day, start_hhmm, end_hhmm, tz):
+        """HH:MM 起訖 → (起, 訖) 當地時區的 datetime；訖 <= 起 視為跨日。"""
+        start_m, end_m = _minutes(start_hhmm), _minutes(end_hhmm)
+        end_day = day + dt.timedelta(days=1) if end_m <= start_m else day
+        return (dt.datetime.combine(day, dt.time(start_m // 60, start_m % 60), tzinfo=tz),
+                dt.datetime.combine(end_day, dt.time(end_m // 60, end_m % 60), tzinfo=tz))
+
+    @staticmethod
+    def _span_fields(start_dt, end_dt):
+        """(起, 訖) datetime → (起 當地, 訖 當地, 起 UTC, 訖 UTC, 時數)。"""
+        return (start_dt.strftime("%Y-%m-%d %H:%M"), end_dt.strftime("%Y-%m-%d %H:%M"),
+                start_dt.astimezone(dt.timezone.utc).isoformat(), end_dt.astimezone(dt.timezone.utc).isoformat(),
+                (end_dt - start_dt).total_seconds() / 3600)
+
+    def _time_span(self, day, start_hhmm, end_hhmm, tz):
+        """HH:MM 起訖 → (起 當地, 訖 當地, 起 UTC, 訖 UTC, 時數)；訖 <= 起 視為跨日。"""
+        return self._span_fields(*self._span_dt(day, start_hhmm, end_hhmm, tz))
+
+    def _work_span(self, row):
+        """班表某天佔用的上班時段（UTC datetime），沒有上班時為 None。
+        請假的日子看原本的班（base_shift_code），所以半天假那天的加班也要避開整個原本的班。"""
+        if row["base_shift_code"]:
+            sh = self.get_shift(row["base_shift_code"])
+            tz_name = OFFICE_TZ.get(row["office_code"])
+            if sh is not None and sh["start_time"] and sh["end_time"] and tz_name:
+                start, end = self._span_dt(dt.date.fromisoformat(row["roster_date"]), sh["start_time"],
+                                           sh["end_time"], ZoneInfo(tz_name))
+                return start.astimezone(dt.timezone.utc), end.astimezone(dt.timezone.utc)
+        if row["planned_start_utc"] and row["planned_end_utc"]:
+            return (dt.datetime.fromisoformat(row["planned_start_utc"]),
+                    dt.datetime.fromisoformat(row["planned_end_utc"]))
+        return None
+
+    def _busy_spans(self, employee_id, day):
+        """加班不能碰到的時段：前一天（可能跨夜到今天）、當天、隔天的上班時段。"""
+        days = [_iso(day + dt.timedelta(days=i)) for i in (-1, 0, 1)]
+        rows = self.conn.execute(
+            f"SELECT * FROM fact_roster WHERE employee_id = ? AND roster_date IN ({', '.join('?' * 3)})",
+            [employee_id] + days).fetchall()
+        return [span for span in (self._work_span(r) for r in rows) if span]
+
+    def _base_shift_text(self, employee_id, day):
+        """當天的班（給畫面提示）：'S0918_FD 09:00 → 18:00'，沒有上班時為 None。"""
+        row = self.get_roster(f"{employee_id}-{_iso(day).replace('-', '')}")
+        code = row and (row["base_shift_code"] or (row["shift_code"] if row["planned_start_local"] else None))
+        sh = self.get_shift(code) if code else None
+        if sh is None or not (sh["start_time"] and sh["end_time"]):
+            return None
+        return f"{code} {sh['start_time']} → {sh['end_time']}"
+
+    def overtime_slots(self, employee_id, day):
+        """時間制加班可以選的時段：每 TIME_STEP_MINUTES 一格、至少 OT_MIN_HOURS、最多 OT_MAX_HOURS 小時，
+        而且不碰到前一天 / 當天 / 隔天的班。回傳 {shift, starts: [{value, ends: [{value, label, hours}]}]}。
+        送出與核准時用同一套規則檢查（見 build_overtime_row）。"""
+        _, tz = self._employee_on(employee_id, day)
+        base = self.get_roster(f"{employee_id}-{_iso(day).replace('-', '')}")
+        if base is not None and base["status_group"] == "Leave" and (base["leave_fraction"] or 0) >= 1:
+            raise ValueError(f"{_iso(day)} 是全天請假，不能申請加班")
+        busy = self._busy_spans(employee_id, day)
+        step = dt.timedelta(minutes=TIME_STEP_MINUTES)
+        min_n, max_n = int(OT_MIN_HOURS * 60 / TIME_STEP_MINUTES), int(OT_MAX_HOURS * 60 / TIME_STEP_MINUTES)
+        starts = []
+        for i in range(24 * 60 // TIME_STEP_MINUTES):
+            start = dt.datetime.combine(day, dt.time(0), tzinfo=tz) + i * step
+            ends = []
+            for n in range(1, max_n + 1):
+                end = start + n * step
+                if any(start.astimezone(dt.timezone.utc) < b_end and end.astimezone(dt.timezone.utc) > b_start
+                       for b_start, b_end in busy):
+                    break
+                if n >= min_n:
+                    ends.append({"value": end.strftime("%H:%M"),
+                                 "label": ("隔天 " if end.date() > day else "") + end.strftime("%H:%M"),
+                                 "hours": n * TIME_STEP_MINUTES / 60})
+            if ends:
+                starts.append({"value": start.strftime("%H:%M"), "ends": ends})
+        return {"shift": self._base_shift_text(employee_id, day), "starts": starts}
+
+
+    def build_roster_row(self, employee_id, shift_code, roster_date, leave_approval_status=None, remarks=None):
+        """讀主檔、計算衍生欄位，回傳 (row, flags)。不允許寫入時丟出 ValueError。
+        加班不寫在班表，改用 fact_overtime（見 build_overtime_row）。"""
+        sh = self.conn.execute("SELECT * FROM dim_shift_code WHERE shift_code = ?", (shift_code,)).fetchone()
+        if sh is None:
+            raise ValueError(f"找不到班別 {shift_code}")
+        if not sh["is_active"]:
+            raise ValueError(f"班別 {shift_code} 已停用")
+        if sh["category"] == "OT":
+            raise ValueError("加班請用「登記加班」，不會覆蓋當天的班")
+        emp, tz = self._employee_on(employee_id, roster_date)
+        ds = _iso(roster_date)
+
+        # 班別時間
+        start_local = end_local = start_utc = end_utc = None
+        planned_hours = 0.0
+        if sh["start_time"] and sh["end_time"]:
+            start_local, end_local, start_utc, end_utc, duration_h = self._time_span(
+                roster_date, sh["start_time"], sh["end_time"], tz)
+            planned_hours = round(duration_h - (sh["break_minutes"] or 0) / 60, 2)
+
+        day_type, is_rest_day, holiday_name = self._day_info(emp, roster_date)
+        wd = roster_date.isoweekday()
 
         # 檢查
         status = sh["status_group"]
         flags = []
-        if day_type != "Work Day" and status == "Work" and not is_ot:
-            flags.append("非工作日上班但未標 OT")
+        if day_type != "Work Day" and status == "Work":
+            flags.append("非工作日排上班，加班請另外登記")
         if day_type != "Work Day" and status == "Leave":
             flags.append("非工作日請假")
         if status == "Leave" and leave_approval_status != "Approved":
             flags.append("請假未核准")
         if day_type == "Work Day" and status == "Rest" and shift_code != "PH_FD":
             flags.append("工作日排休，請確認")
-        if shift_code == "PH_FD" and not hol:
+        if shift_code == "PH_FD" and not holiday_name:
             flags.append(f"排 PH 但 {emp['calendar_code']} 當天不是假日")
         if not emp["rest_pattern_code"]:
             flags.append("員工未設定休息模式")
         if start_utc:
-            prev = conn.execute(
+            prev = self.conn.execute(
                 "SELECT planned_end_utc FROM fact_roster WHERE employee_id = ? AND roster_date = ?",
                 (employee_id, _iso(roster_date - dt.timedelta(days=1))),
             ).fetchone()
@@ -530,12 +658,12 @@ class RosterDB:
             "team": emp["team"],
             "brand": emp["brand"],
             "shift_code": shift_code,
-            "is_ot": int(bool(is_ot)),
+            "is_ot": 0,                    # 舊欄位，保留不用；加班在 fact_overtime
             "status_group": status,
             "shift_type": sh["shift_type"],
-            "work_fraction": work_fraction,
+            "work_fraction": sh["work_fraction"] or 0,
             "leave_fraction": sh["leave_fraction"] or 0,
-            "ot_fraction": ot_fraction,
+            "ot_fraction": 0,
             "planned_start_local": start_local,
             "planned_end_local": end_local,
             "planned_start_utc": start_utc,
@@ -543,13 +671,14 @@ class RosterDB:
             "planned_hours": planned_hours,
             "weekday": WEEKDAY[wd - 1],
             "is_rest_pattern_day": int(is_rest_day),
-            "is_public_holiday": int(bool(hol)),
-            "holiday_name": hol["holiday_name"] if hol else None,
+            "is_public_holiday": int(bool(holiday_name)),
+            "holiday_name": holiday_name,
             "day_type": day_type,
             "leave_approval_status": leave_approval_status or None,
             "remarks": remarks or None,
             "check_flag": "；".join(flags) or None,
             "leave_request_id": None,      # 一般提交會清掉與請假申請的關聯
+            "base_shift_code": None,       # 請假時才記錄原本的班（見 _apply_leave）
         }
         return row, flags
 
@@ -570,7 +699,7 @@ class RosterDB:
         )
         return "updated" if exists else "created"
 
-    def submit_range(self, employee_id, shift_code, start_date, end_date, is_ot=False,
+    def submit_range(self, employee_id, shift_code, start_date, end_date,
                      leave_approval_status=None, remarks=None, skip_non_working=True, allow_update=True):
         """把同一個班別套用到日期區間內的每一天，回傳每天的結果。
         allow_update=False（沒有 USER_EDIT）時，已有排班的日子不覆蓋。"""
@@ -584,10 +713,9 @@ class RosterDB:
         for i in range(days):
             d = start_date + dt.timedelta(days=i)
             try:
-                row, flags = self.build_roster_row(employee_id, shift_code, d, is_ot,
-                                                   leave_approval_status, remarks)
+                row, flags = self.build_roster_row(employee_id, shift_code, d, leave_approval_status, remarks)
                 if (skip_non_working and row["day_type"] != "Work Day"
-                        and row["status_group"] in ("Work", "Leave") and not is_ot):
+                        and row["status_group"] in ("Work", "Leave")):
                     results.append({"date": _iso(d), "action": "skipped",
                                     "message": f"略過：{row['day_type']}", "row": row})
                     continue
@@ -596,6 +724,10 @@ class RosterDB:
                     raise ValueError(f"這天由請假單 {existing['leave_request_id']} 寫入，請到「請假」頁取消後再修改")
                 if not allow_update and existing is not None:
                     raise ValueError("當天已有排班，修改需要 USER_EDIT 權限")
+                if row["leave_fraction"] >= 1 and self.get_overtime(row["roster_key"]):
+                    raise ValueError("這天已登記加班，不能排全天請假；請先刪除加班")
+                if row["status_group"] == "Leave":
+                    self._apply_leave(row, self.get_shift(shift_code))
                 action = self.upsert_roster(row)
                 self.conn.commit()
                 results.append({"date": _iso(d), "action": action, "message": row["check_flag"] or "", "row": row})
@@ -603,6 +735,312 @@ class RosterDB:
                 self.conn.rollback()
                 results.append({"date": _iso(d), "action": "error", "message": str(e), "row": None})
         return results
+
+    # ---------------- 加班（fact_overtime，與班表分開存，一人一天最多一筆） ----------------
+    def build_overtime_row(self, employee_id, overtime_date, shift_code=None, start_time=None, end_time=None,
+                           remarks=None):
+        """單位制（shift_code = OT_FD / OT_H1 / OT_H2）或時間制（start_time + end_time）擇一。
+        回傳 (row, flags)；不允許寫入時丟出 ValueError。"""
+        if bool(shift_code) == bool(start_time or end_time):
+            raise ValueError("請選擇加班班別，或填寫加班開始與結束時間（擇一）")
+        emp, tz = self._employee_on(employee_id, overtime_date)
+        ds = _iso(overtime_date)
+        start_local = end_local = start_utc = end_utc = ot_hours = None
+        if shift_code:
+            sh = self.get_shift(shift_code)
+            if sh is None or sh["category"] != "OT":
+                raise ValueError(f"{shift_code} 不是加班班別")
+            if not sh["is_active"]:
+                raise ValueError(f"班別 {shift_code} 已停用")
+            ot_fraction = sh["ot_fraction"] or 0
+        else:
+            if not (start_time and end_time):
+                raise ValueError("時間制加班需要開始與結束時間")
+            if _minutes(start_time) % TIME_STEP_MINUTES or _minutes(end_time) % TIME_STEP_MINUTES:
+                raise ValueError(f"加班時間需以 {TIME_STEP_MINUTES} 分鐘為單位")
+            start_dt, end_dt = self._span_dt(overtime_date, start_time, end_time, tz)
+            start_local, end_local, start_utc, end_utc, ot_hours = self._span_fields(start_dt, end_dt)
+            if not OT_MIN_HOURS <= ot_hours <= OT_MAX_HOURS:
+                raise ValueError(f"加班時數需介於 {OT_MIN_HOURS:g} 到 {OT_MAX_HOURS:g} 小時")
+            ot_hours = round(ot_hours, 2)
+            ot_fraction = round(min(ot_hours / OT_FULL_DAY_HOURS, 1), 4)
+
+        day_type, _, holiday_name = self._day_info(emp, overtime_date)
+        key = f"{employee_id}-{ds.replace('-', '')}"
+        base = self.get_roster(key)
+        flags = []
+        if base is not None and base["status_group"] == "Leave" and (base["leave_fraction"] or 0) >= 1:
+            raise ValueError("這天是全天請假，不能申請加班")
+        if shift_code and base is not None and self._work_span(base):
+            raise ValueError("這天有排上班，整天 / 半天加班只能用在沒有上班的日子，上班日請用填時間的方式")
+        if start_utc:
+            ot_span = (start_dt.astimezone(dt.timezone.utc), end_dt.astimezone(dt.timezone.utc))
+            for b_start, b_end in self._busy_spans(employee_id, overtime_date):
+                if ot_span[0] < b_end and ot_span[1] > b_start:
+                    raise ValueError(f"加班時段與 {b_start.astimezone(tz):%m-%d %H:%M} → "
+                                     f"{b_end.astimezone(tz):%m-%d %H:%M} 的班重疊")
+
+        row = {
+            "overtime_key": key,
+            "overtime_date": ds,
+            "employee_id": employee_id,
+            "shift_code": shift_code or None,
+            "start_local": start_local,
+            "end_local": end_local,
+            "start_utc": start_utc,
+            "end_utc": end_utc,
+            "ot_hours": ot_hours,
+            "ot_fraction": ot_fraction,
+            "weekday": WEEKDAY[overtime_date.isoweekday() - 1],
+            "day_type": day_type,
+            "holiday_name": holiday_name,
+            "remarks": remarks or None,
+            "check_flag": "；".join(flags) or None,
+        }
+        return row, flags
+
+    def upsert_overtime(self, row):
+        """同人同日已有加班就更新（版本 +1），否則新增。回傳 'created' 或 'updated'。"""
+        now = _now()
+        exists = self.get_overtime(row["overtime_key"]) is not None
+        cols = list(row) + ["created_at", "updated_at"]
+        vals = list(row.values()) + [now, now]
+        updates = ", ".join(f"{c} = excluded.{c}" for c in row if c != "overtime_key")
+        self.conn.execute(
+            f"""INSERT INTO fact_overtime ({", ".join(cols)}) VALUES ({", ".join("?" * len(cols))})
+                ON CONFLICT (overtime_key) DO UPDATE SET {updates},
+                    updated_at = excluded.updated_at,
+                    overtime_version = fact_overtime.overtime_version + 1""",
+            vals,
+        )
+        return "updated" if exists else "created"
+
+    def plan_overtime(self, employee_id, start_date, end_date, shift_code=None, start_time=None, end_time=None):
+        """加班申請會寫進 fact_overtime 的日子；任一天不符合就丟出 ValueError（訊息帶日期）。
+        回傳 (rows, 天數合計, 時數合計或 None)。"""
+        if end_date < start_date:
+            raise ValueError("結束日期不可早於開始日期")
+        if (start_time or end_time) and end_date != start_date:
+            raise ValueError("填時間的加班一次只能申請一天（每天的班可能不同）")
+        span = (end_date - start_date).days + 1
+        if span > MAX_RANGE_DAYS:
+            raise ValueError(f"一次最多申請 {MAX_RANGE_DAYS} 天")
+        rows = []
+        for i in range(span):
+            d = start_date + dt.timedelta(days=i)
+            try:
+                row, _ = self.build_overtime_row(employee_id, d, shift_code, start_time, end_time)
+                if self.get_overtime(row["overtime_key"]) is not None:
+                    raise ValueError("這天已有加班紀錄")
+            except ValueError as e:
+                raise ValueError(f"{_iso(d)}：{e}") from None
+            rows.append(row)
+        hours = sum(r["ot_hours"] for r in rows) if not shift_code else None
+        return rows, round(sum(r["ot_fraction"] for r in rows), 4), hours
+
+    def overtime_overlap(self, employee_id, start, end):
+        """同一人與 start ~ end 重疊、仍有效（待審核 / 已核准）的加班申請單號，沒有時回傳 None。"""
+        hit = self.conn.execute(
+            """SELECT request_id FROM fact_overtime_request
+               WHERE employee_id = ? AND status IN ('Pending', 'Approved') AND start_date <= ? AND end_date >= ?""",
+            (employee_id, _iso(end), _iso(start))).fetchone()
+        return hit["request_id"] if hit else None
+
+    def create_overtime_request(self, employee_id, start_date, end_date, shift_code=None, start_time=None,
+                                end_time=None, reason=None):
+        """送出加班申請（Pending），回傳 request_id。"""
+        self._check_can_submit(employee_id, "OT_APPROVE", "加班")
+        _, days, hours = self.plan_overtime(employee_id, start_date, end_date, shift_code, start_time, end_time)
+        hit = self.overtime_overlap(employee_id, start_date, end_date)
+        if hit:
+            raise ValueError(f"日期與加班申請單 {hit} 重疊")
+        rid, now = self._next_request_id("fact_overtime_request", "OTR"), _now()
+        try:
+            self.conn.execute(
+                """INSERT INTO fact_overtime_request
+                   (request_id, employee_id, shift_code, start_time, end_time, start_date, end_date, days, hours,
+                    reason, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,'Pending',?,?)""",
+                (rid, employee_id, shift_code or None, start_time or None, end_time or None, _iso(start_date),
+                 _iso(end_date), days, hours, reason or None, now, now))
+            self.conn.commit()
+        except sqlite3.IntegrityError:      # 兩人同時送出拿到同一個單號
+            self.conn.rollback()
+            raise ValueError("送出時發生衝突，請再送一次") from None
+        return rid
+
+    def get_overtime_request(self, request_id):
+        return self.conn.execute("SELECT * FROM fact_overtime_request WHERE request_id = ?", (request_id,)).fetchone()
+
+    def overtime_approvers(self, employee_id):
+        return self._approvers(employee_id, "OT_APPROVE")
+
+    def _plan_request(self, req):
+        return self.plan_overtime(req["employee_id"], dt.date.fromisoformat(req["start_date"]),
+                                  dt.date.fromisoformat(req["end_date"]), req["shift_code"],
+                                  req["start_time"], req["end_time"])
+
+    def approve_overtime_request(self, request_id, approver_id, note=None):
+        """核准並逐日寫入 fact_overtime（同一個交易；任何一天失敗就整筆回滾）。回傳寫入天數。"""
+        table = "fact_overtime_request"
+        req = self._request_in(request_id, "Pending", table=table)
+        self._check_approver(req, approver_id, "加班")
+        try:
+            rows, days, hours = self._plan_request(req)
+            for row in rows:
+                row.update(overtime_request_id=request_id, remarks=req["reason"])
+                self.upsert_overtime(row)
+            now = _now()
+            self._set_request_status(
+                request_id, "Pending",
+                "status = 'Approved', days = ?, hours = ?, approver_id = ?, decided_at = ?, decision_note = ?, "
+                "updated_at = ?", (days, hours, approver_id, now, note or None, now), table=table)
+            self.conn.commit()
+        except (ValueError, sqlite3.Error):
+            self.conn.rollback()
+            raise
+        return len(rows)
+
+    def reject_overtime_request(self, request_id, approver_id, note=None):
+        table = "fact_overtime_request"
+        req = self._request_in(request_id, "Pending", table=table)
+        self._check_approver(req, approver_id, "加班")
+        now = _now()
+        self._set_request_status(request_id, "Pending",
+                                 "status = 'Rejected', approver_id = ?, decided_at = ?, decision_note = ?, updated_at = ?",
+                                 (approver_id, now, note or None, now), table=table)
+        self.conn.commit()
+
+    def cancel_overtime_request(self, request_id, actor_id, as_approver=False, note=None):
+        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消，
+        並刪除這張申請寫入的加班。回傳刪除的天數。"""
+        table = "fact_overtime_request"
+        req = self._request_in(request_id, "Pending", "Approved", table=table)
+        own_pending = req["status"] == "Pending" and req["employee_id"] == actor_id
+        if not own_pending:
+            if not as_approver:
+                raise ValueError("已核准的加班需由主管取消" if req["status"] == "Approved" else "只能撤回自己的申請")
+            self._check_approver(req, actor_id, "加班")
+        try:
+            removed = self.conn.execute("DELETE FROM fact_overtime WHERE overtime_request_id = ?",
+                                        (request_id,)).rowcount
+            who = "申請人撤回" if own_pending else f"{actor_id} 取消"
+            self._set_request_status(request_id, req["status"], "status = 'Cancelled', decision_note = ?, updated_at = ?",
+                                     (f"{who}：{note}" if note else who, _now()), table=table)
+            self.conn.commit()
+        except (ValueError, sqlite3.Error):
+            self.conn.rollback()
+            raise
+        return removed
+
+    _OVERTIME_SELECT = """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display,
+                                 a.full_name AS approver_name
+                          FROM fact_overtime_request q
+                          JOIN dim_employee e ON e.employee_id = q.employee_id
+                          LEFT JOIN dim_shift_code s ON s.shift_code = q.shift_code
+                          LEFT JOIN dim_employee a ON a.employee_id = q.approver_id"""
+
+    def overtime_requests(self, employee_id=None, approver_id=None, statuses=None, limit=LEAVE_REQUEST_LIMIT):
+        """employee_id：某人自己的申請；approver_id：這個人可以審核的申請（排除自己的）。"""
+        where, args = [], []
+        if employee_id:
+            where.append("q.employee_id = ?")
+            args.append(employee_id)
+        if approver_id:
+            where.append("q.employee_id != ? AND (e.parent_id IS NULL OR e.parent_id = e.employee_id OR e.parent_id = ?)")
+            args += [approver_id, approver_id]
+        if statuses:
+            where.append(f"q.status IN ({_in(statuses)})")
+        sql = self._OVERTIME_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+        return self.conn.execute(sql + " ORDER BY q.created_at DESC, q.request_id DESC LIMIT ?", args + [limit]).fetchall()
+
+    def pending_overtime_count(self, approver_id):
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM fact_overtime_request q JOIN dim_employee e ON e.employee_id = q.employee_id
+               WHERE q.status = 'Pending' AND q.employee_id != ?
+                 AND (e.parent_id IS NULL OR e.parent_id = e.employee_id OR e.parent_id = ?)""",
+            (approver_id, approver_id)).fetchone()[0]
+
+    def _pending_overtime_days(self, start, end):
+        """與 start ~ end 重疊的待審核加班，展開成每天一列；已無法成立的申請（例如之後排了全天假）略過。"""
+        rows = []
+        for q in self.conn.execute(
+                """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display FROM fact_overtime_request q
+                   JOIN dim_employee e ON e.employee_id = q.employee_id
+                   LEFT JOIN dim_shift_code s ON s.shift_code = q.shift_code
+                   WHERE q.status = 'Pending' AND q.start_date <= ? AND q.end_date >= ?""", (end, start)):
+            try:
+                planned, _, _ = self._plan_request(q)
+            except ValueError:
+                continue
+            rows += [dict(r, full_name=q["full_name"], team=q["team"], office_code=q["office_code"],
+                          roster_display=q["roster_display"], request_id=q["request_id"])
+                     for r in planned if start <= r["overtime_date"] <= end]
+        return rows
+
+    def get_overtime(self, overtime_key):
+        return self.conn.execute("SELECT * FROM fact_overtime WHERE overtime_key = ?", (overtime_key,)).fetchone()
+
+    def recent_overtime(self, employee_id, date_from=None, date_to=None, limit=RECENT_ROSTER_LIMIT):
+        where, args = ["o.employee_id = ?"], [employee_id]
+        if date_from:
+            where.append("o.overtime_date >= ?")
+            args.append(date_from)
+        if date_to:
+            where.append("o.overtime_date <= ?")
+            args.append(date_to)
+        return self.conn.execute(
+            f"""SELECT o.*, s.roster_display FROM fact_overtime o
+                LEFT JOIN dim_shift_code s ON s.shift_code = o.shift_code
+                WHERE {" AND ".join(where)} ORDER BY o.overtime_date DESC LIMIT ?""",
+            args + [limit]).fetchall()
+
+    def delete_overtime(self, overtime_key):
+        """只用於沒有申請單的舊資料；由申請核准的加班要從加班頁取消申請單。"""
+        row = self.get_overtime(overtime_key)
+        if row is not None and row["overtime_request_id"]:
+            raise ValueError(f"這筆加班由申請單 {row['overtime_request_id']} 核准，請由主管在加班頁取消")
+        cur = self.conn.execute("DELETE FROM fact_overtime WHERE overtime_key = ?", (overtime_key,))
+        self.conn.commit()
+        if cur.rowcount == 0:
+            raise ValueError(f"找不到加班 {overtime_key}")
+
+    def migrate_overtime(self):
+        """舊資料：班表上的加班（is_ot = 1 或 OT 班別）搬到 fact_overtime，並刪除班表那天
+        （原本的班別已被加班覆蓋、無法還原，需由本人重新提交）。回傳 [(employee_id, 日期), ...]。"""
+        legacy = self.conn.execute(
+            """SELECT r.*, s.category FROM fact_roster r JOIN dim_shift_code s ON s.shift_code = r.shift_code
+               WHERE r.is_ot = 1 OR s.category = 'OT' ORDER BY r.roster_date""").fetchall()
+        if not legacy:
+            return []
+        # 搬移會刪除班表資料：先另存一份快照（檔名不符合每日備份的格式，不會被自動清理）
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        snapshot = sqlite3.connect(os.path.join(BACKUP_DIR, f"before_overtime_migration_{dt.datetime.now():%Y%m%d_%H%M%S}.db"))
+        try:
+            self.conn.backup(snapshot)
+        finally:
+            snapshot.close()
+        moved = []
+        for r in legacy:
+            unit = r["category"] == "OT"
+            hours = None if unit else r["planned_hours"]
+            fraction = (r["ot_fraction"] or 0) if unit else round(min((hours or 0) / OT_FULL_DAY_HOURS, 1), 4)
+            now = _now()
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO fact_overtime
+                   (overtime_key, overtime_date, employee_id, shift_code, start_local, end_local, start_utc, end_utc,
+                    ot_hours, ot_fraction, weekday, day_type, holiday_name, remarks, check_flag, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (r["roster_key"], r["roster_date"], r["employee_id"], r["shift_code"] if unit else None,
+                 None if unit else r["planned_start_local"], None if unit else r["planned_end_local"],
+                 None if unit else r["planned_start_utc"], None if unit else r["planned_end_utc"],
+                 hours, fraction, r["weekday"], r["day_type"], r["holiday_name"],
+                 r["remarks"], "由舊班表搬移", r["created_at"] or now, now))
+            if cur.rowcount:
+                self.conn.execute("DELETE FROM fact_roster WHERE roster_key = ?", (r["roster_key"],))
+                moved.append((r["employee_id"], r["roster_date"]))
+        self.conn.commit()
+        return moved
 
     def form_options(self):
         """表單用的在職員工清單，以及依類別分組的有效班別。"""
@@ -639,23 +1077,38 @@ class RosterDB:
 
     def roster_pivot(self, year, month=None):
         """當年度（或指定月份）班表樞紐：列 = (team, office_code, full_name)，欄 = roster_date，
-        值 = 班別的 roster_display 與 situation（SHIFT / LEAVE / OT / OFF / ACTIVITY，標記加班一律算 OT）。
-        full_name 依 employee_id 從 dim_employee 帶出。回傳 (pivot, totals)，totals 為每人上班 / 請假 / 加班天數。"""
+        值 = 班別的 roster_display 與 situation（SHIFT / LEAVE / OT / OFF / ACTIVITY）。
+        有加班的日子在班別後加「+OT」；只有加班沒有班的日子顯示 OT。
+        full_name 依 employee_id 從 dim_employee 帶出。回傳 (pivot, totals)，totals 為每人上班 / 請假 / 加班天數與加班時數。"""
         start, end = period_range(year, month)
+        params = (start.isoformat(), end.isoformat())
         roster = pd.read_sql_query(
             """SELECT r.team, r.office_code, COALESCE(e.full_name, r.employee_id) AS full_name,
                       r.roster_date, r.employee_id,
                       COALESCE(s.roster_display, r.shift_code) AS roster_display,
-                      CASE WHEN r.is_ot = 1 THEN 'OT' ELSE COALESCE(s.category, 'SHIFT') END AS situation,
-                      r.work_fraction, r.leave_fraction, r.ot_fraction
+                      COALESCE(s.category, 'SHIFT') AS situation,
+                      r.work_fraction, r.leave_fraction
                FROM fact_roster r
                LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
                LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
                WHERE r.roster_date BETWEEN ? AND ?
                ORDER BY r.roster_date, r.employee_id""",
-            self.conn, params=(start.isoformat(), end.isoformat()),
+            self.conn, params=params,
         )
-        pending = self._pending_leave_frame(start.isoformat(), end.isoformat())
+        overtime = pd.read_sql_query(
+            """SELECT o.employee_id, o.overtime_date AS roster_date, o.ot_fraction, COALESCE(o.ot_hours, 0) AS ot_hours,
+                      e.team, e.office_code, COALESCE(e.full_name, o.employee_id) AS full_name
+               FROM fact_overtime o
+               LEFT JOIN dim_employee e ON e.employee_id = o.employee_id
+               WHERE o.overtime_date BETWEEN ? AND ?""",
+            self.conn, params=params,
+        )
+        roster = self._overlay_overtime(roster, overtime, " +OT", "OT")
+        pending_ot = pd.DataFrame(self._pending_overtime_days(*params))
+        if not pending_ot.empty:
+            pending_ot = pending_ot.rename(columns={"overtime_date": "roster_date"})
+            roster = self._overlay_overtime(roster, pending_ot, " +OT（待審）", "OT（待審）", "OT_PENDING")
+        pending = self._pending_leave_frame(*params)
         if not pending.empty:
             # 待審核的假疊在原本班別上（pivot 取 last），天數算 0，不影響小計
             roster = pd.concat([roster, pending], ignore_index=True).sort_values("roster_date", kind="stable")
@@ -669,8 +1122,35 @@ class RosterDB:
             values=["roster_display", "situation"],
             aggfunc="last",
         )
-        totals = roster.groupby(index)[["work_fraction", "leave_fraction", "ot_fraction"]].sum()
+        totals = roster.groupby(index)[["work_fraction", "leave_fraction"]].sum()
+        totals[["ot_fraction", "ot_hours"]] = 0.0
+        if not overtime.empty:
+            ot_by_emp = overtime.groupby("employee_id")[["ot_fraction", "ot_hours"]].sum()
+            emp_ids = totals.index.get_level_values("employee_id")
+            totals["ot_fraction"] = ot_by_emp["ot_fraction"].reindex(emp_ids).fillna(0).to_numpy()
+            totals["ot_hours"] = ot_by_emp["ot_hours"].reindex(emp_ids).fillna(0).to_numpy()
         return pivot, totals
+
+    @staticmethod
+    def _overlay_overtime(roster, marks, suffix, only_display, situation=None):
+        """把加班疊到總覽：有班的日子在班別後加 suffix（指定 situation 時也改顏色），
+        只有加班的日子另加一列（沿用該員工在班表上的 team / office_code，避免拆成兩列）。天數不在這裡計入。"""
+        if marks.empty:
+            return roster
+        mark_keys = set(zip(marks["employee_id"], marks["roster_date"]))
+        have = set(zip(roster["employee_id"], roster["roster_date"]))
+        hit = [k in mark_keys for k in zip(roster["employee_id"], roster["roster_date"])]
+        roster.loc[hit, "roster_display"] = roster.loc[hit, "roster_display"] + suffix
+        if situation:
+            roster.loc[hit, "situation"] = situation
+        only = marks[[k not in have for k in zip(marks["employee_id"], marks["roster_date"])]].copy()
+        if only.empty:
+            return roster
+        known = roster.drop_duplicates("employee_id", keep="last").set_index("employee_id")
+        for col in ("team", "office_code", "full_name"):
+            only[col] = [known[col].get(e, v) for e, v in zip(only["employee_id"], only[col])]
+        only = only.assign(roster_display=only_display, situation=situation or "OT", work_fraction=0, leave_fraction=0)
+        return pd.concat([roster, only[roster.columns]], ignore_index=True).sort_values("roster_date", kind="stable")
 
     def _pending_leave_frame(self, start, end):
         """與 start ~ end 重疊的待審核請假，展開成每天一列（situation = PENDING）。"""
@@ -681,7 +1161,7 @@ class RosterDB:
                    JOIN dim_shift_code s ON s.shift_code = q.shift_code
                    WHERE q.status = 'Pending' AND q.start_date <= ? AND q.end_date >= ?""", (end, start)):
             try:
-                planned, _ = self.plan_leave(q["employee_id"], q["shift_code"],
+                planned, _, _ = self.plan_leave(q["employee_id"], q["shift_code"],
                                              dt.date.fromisoformat(q["start_date"]), dt.date.fromisoformat(q["end_date"]))
             except ValueError:
                 continue
@@ -693,13 +1173,15 @@ class RosterDB:
                      for r in planned if start <= r["roster_date"] <= end]
         return pd.DataFrame(rows)
 
-    DETAIL_FRACTION = {"work": "work_fraction", "leave": "leave_fraction", "ot": "ot_fraction"}
 
+    DETAIL_FRACTION = {"work": "work_fraction", "leave": "leave_fraction"}
     def roster_detail(self, kind, year, month=None, employee_id=None):
         """總覽「上班 / 請假 / 加班」的逐日明細：該項天數 > 0 的每一天。
         請假另外附上待審核的日子（天數記 0，不計入小計）。"""
-        col = self.DETAIL_FRACTION[kind]
         start, end = (d.isoformat() for d in period_range(year, month))
+        if kind == "ot":
+            return self._overtime_detail(start, end, employee_id)
+        col = self.DETAIL_FRACTION[kind]
         sql = f"""SELECT r.*, COALESCE(e.full_name, r.full_name) AS name, s.roster_display, r.{col} AS days
                   FROM fact_roster r
                   LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
@@ -711,6 +1193,8 @@ class RosterDB:
             args.append(employee_id)
         rows = [dict(r, pending=False) for r in self.conn.execute(sql, args)]
         if kind == "leave":
+            for r in rows:
+                r["leave_period"] = self.leave_period(r)
             pending = self._pending_leave_frame(start, end)
             for p in pending.to_dict("records") if not pending.empty else []:
                 if employee_id and p["employee_id"] != employee_id:
@@ -720,9 +1204,36 @@ class RosterDB:
                              "employee_id": p["employee_id"], "name": p["full_name"], "team": p["team"],
                              "shift_code": p["shift_code"], "roster_display": p["roster_display"],
                              "day_type": "Work Day", "holiday_name": None, "planned_start_local": None,
-                             "planned_end_local": None, "planned_hours": None, "days": 0, "is_ot": 0,
+                             "planned_end_local": None, "planned_hours": None, "days": 0,
                              "leave_approval_status": None, "leave_request_id": p["request_id"],
                              "remarks": None, "check_flag": None, "pending": True})
+        return sorted(rows, key=lambda r: (r["roster_date"], r["employee_id"]))
+
+    def _overtime_detail(self, start, end, employee_id=None):
+        """加班的逐日明細：已核准（fact_overtime）加上待審核申請的日子（天數記 0），欄位名稱對齊班表明細。"""
+        sql = """SELECT o.overtime_date AS roster_date, o.weekday, o.employee_id, o.shift_code, o.day_type,
+                        o.holiday_name, o.start_local AS planned_start_local, o.end_local AS planned_end_local,
+                        o.ot_hours AS planned_hours, o.ot_fraction AS days, o.remarks, o.check_flag,
+                        o.overtime_request_id AS request_id,
+                        COALESCE(e.full_name, o.employee_id) AS name, s.roster_display
+                 FROM fact_overtime o
+                 LEFT JOIN dim_employee e ON e.employee_id = o.employee_id
+                 LEFT JOIN dim_shift_code s ON s.shift_code = o.shift_code
+                 WHERE o.overtime_date BETWEEN ? AND ?"""
+        args = [start, end]
+        if employee_id:
+            sql += " AND o.employee_id = ?"
+            args.append(employee_id)
+        rows = [dict(r, pending=False) for r in self.conn.execute(sql, args)]
+        for p in self._pending_overtime_days(start, end):
+            if employee_id and p["employee_id"] != employee_id:
+                continue
+            rows.append({"roster_date": p["overtime_date"], "weekday": p["weekday"], "employee_id": p["employee_id"],
+                         "shift_code": p["shift_code"], "day_type": p["day_type"], "holiday_name": p["holiday_name"],
+                         "planned_start_local": p["start_local"], "planned_end_local": p["end_local"],
+                         "planned_hours": p["ot_hours"], "days": 0, "remarks": None, "check_flag": p["check_flag"],
+                         "request_id": p["request_id"], "name": p["full_name"], "roster_display": p["roster_display"],
+                         "pending": True})
         return sorted(rows, key=lambda r: (r["roster_date"], r["employee_id"]))
 
     def leave_calendar(self, year, month):
@@ -757,8 +1268,55 @@ class RosterDB:
             groups.setdefault(s["leave_type"] or s["shift_code"], []).append(s)
         return list(groups.items())
 
+    def _leave_split(self, day, leave_sh, base_sh, tz):
+        """依原本的班切出請假時段與剩下的上班時段（當地 datetime）。工時扣掉休息時間；
+        上半天（H1）請在前面，其餘（H2 / QT / PT）請在後面，休息時間留在兩段之間。回傳 (請假, 上班, 上班時數)。"""
+        start, end = self._span_dt(day, base_sh["start_time"], base_sh["end_time"], tz)
+        work_h = (end - start).total_seconds() / 3600 - (base_sh["break_minutes"] or 0) / 60
+        leave_h = work_h * (leave_sh["leave_fraction"] or 0)
+        leave_td, rest_td = dt.timedelta(hours=leave_h), dt.timedelta(hours=work_h - leave_h)
+        if leave_sh["day_portion"] == "H1":
+            return (start, start + leave_td), (end - rest_td, end), work_h - leave_h
+        return (end - leave_td, end), (start, start + rest_td), work_h - leave_h
+
+    def _apply_leave(self, row, leave_sh):
+        """請假寫入班表前：記下當天原本的上班班別（base_shift_code）；非全天假依原本的班
+        把上下班時間改成剩下要上班的時段。回傳請假時段 'HH:MM → HH:MM'（全天假為 None）。"""
+        existing = self.get_roster(row["roster_key"])
+        base = None
+        if existing is not None:
+            if existing["status_group"] != "Leave" and existing["planned_start_local"]:
+                base = existing["shift_code"]
+            elif existing["base_shift_code"]:
+                base = existing["base_shift_code"]
+        row["base_shift_code"] = base
+        if leave_sh["day_portion"] == "FD":
+            return None
+        base_sh = self.get_shift(base) if base else None
+        if base_sh is None or not (base_sh["start_time"] and base_sh["end_time"]):
+            raise ValueError(f"{row['roster_date']} 還沒有排上班班別，不能請 {leave_sh['shift_code']}"
+                             "（需依當天的班計算請假時段）")
+        tz = ZoneInfo(OFFICE_TZ[row["office_code"]])
+        leave, work, work_h = self._leave_split(dt.date.fromisoformat(row["roster_date"]), leave_sh, base_sh, tz)
+        (row["planned_start_local"], row["planned_end_local"], row["planned_start_utc"],
+         row["planned_end_utc"], _) = self._span_fields(*work)
+        row["planned_hours"] = round(work_h, 2)
+        return f"{leave[0]:%H:%M} → {leave[1]:%H:%M}"
+
+    def leave_period(self, row):
+        """班表上非全天假的請假時段 'HH:MM → HH:MM'；全天假或舊資料（沒有 base_shift_code）為 None。"""
+        leave_sh = self.get_shift(row["shift_code"])
+        base_sh = self.get_shift(row["base_shift_code"]) if row["base_shift_code"] else None
+        tz_name = OFFICE_TZ.get(row["office_code"])
+        if (leave_sh is None or leave_sh["day_portion"] == "FD" or base_sh is None or not tz_name
+                or not (base_sh["start_time"] and base_sh["end_time"])):
+            return None
+        leave, _, _ = self._leave_split(dt.date.fromisoformat(row["roster_date"]), leave_sh, base_sh, ZoneInfo(tz_name))
+        return f"{leave[0]:%H:%M} → {leave[1]:%H:%M}"
+
     def plan_leave(self, employee_id, shift_code, start_date, end_date):
-        """請假會寫進班表的日子（略過休息日與國定假日）。回傳 (rows, days)；不合法時丟出 ValueError。"""
+        """請假會寫進班表的日子（略過休息日與國定假日）。回傳 (rows, days, periods)；不合法時丟出 ValueError。
+        periods 與 rows 對應：{date, shift（原本的班）, leave（非全天假的請假時段）}，給預覽顯示。"""
         sh = self.get_shift(shift_code)
         if sh is None or sh["category"] != "LEAVE":
             raise ValueError("請選擇請假假別")
@@ -784,7 +1342,19 @@ class RosterDB:
             [employee_id] + dates).fetchone()
         if hit:
             raise ValueError(f"{hit['roster_date']} 班表上已經是請假")
-        return rows, sum(r["leave_fraction"] for r in rows)
+        if (sh["leave_fraction"] or 0) >= 1:
+            ot = self.conn.execute(
+                f"""SELECT overtime_date FROM fact_overtime WHERE employee_id = ?
+                    AND overtime_date IN ({", ".join("?" * len(dates))}) ORDER BY overtime_date""",
+                [employee_id] + dates).fetchone()
+            if ot:
+                raise ValueError(f"{ot['overtime_date']} 已登記加班，不能請全天假；請先刪除加班")
+        periods = []
+        for row in rows:
+            leave = self._apply_leave(row, sh)
+            periods.append({"date": row["roster_date"], "leave": leave,
+                            "shift": self._base_shift_text(employee_id, dt.date.fromisoformat(row["roster_date"]))})
+        return rows, sum(r["leave_fraction"] for r in rows), periods
 
     def leave_overlap(self, employee_id, start, end, exclude=None):
         """同一人與 start ~ end 重疊、仍有效（待審核 / 已核准）的申請單號，沒有時回傳 None。"""
@@ -795,23 +1365,40 @@ class RosterDB:
             (employee_id, _iso(end), _iso(start), exclude or "")).fetchone()
         return hit["request_id"] if hit else None
 
-    def _next_request_id(self):
-        prefix = f"LR-{dt.date.today():%Y%m%d}-"
+    # 請假與加班共用的申請單規則：table 為 fact_leave_request 或 fact_overtime_request
+    def _next_request_id(self, table="fact_leave_request", code="LR"):
+        prefix = f"{code}-{dt.date.today():%Y%m%d}-"
         nums = [int(r[0][len(prefix):]) for r in self.conn.execute(
-            "SELECT request_id FROM fact_leave_request WHERE request_id LIKE ?", (prefix + "%",))]
+            f"SELECT request_id FROM {table} WHERE request_id LIKE ?", (prefix + "%",))]
         return f"{prefix}{max(nums, default=0) + 1:03d}"
+
+    def _approvers(self, employee_id, perm):
+        """目前能審核此員工申請的人：能登入、有 perm、不是本人；
+        有主管時只有主管，最高主管（或舊資料沒有主管）時是其他所有符合條件的人。"""
+        emp = self.get_employee(employee_id)
+        rows = self.conn.execute("SELECT * FROM dim_employee WHERE employee_id != ? ORDER BY employee_id",
+                                 (employee_id,)).fetchall()
+        if emp["parent_id"] and emp["parent_id"] != employee_id:
+            rows = [r for r in rows if r["employee_id"] == emp["parent_id"]]
+        return [r for r in rows if self.can_login(r) and perm in parse_permissions(r["permission"])]
+
+    def _check_can_submit(self, employee_id, perm, what):
+        """送出申請前：必須有主管，而且目前有人能審。"""
+        emp = self.get_employee(employee_id)
+        if emp is None:
+            return
+        if not emp["parent_id"]:
+            raise ValueError(f"尚未設定主管，無法送出{what}申請，請聯絡管理員")
+        if not self._approvers(employee_id, perm):
+            if emp["parent_id"] != employee_id:
+                raise ValueError(f"主管 {emp['parent_id']} {emp['parent_name'] or ''} 目前無法登入審核"
+                                 f"（未設定密碼、已離職或沒有 {perm}），請聯絡管理員")
+            raise ValueError(f"你是最高主管，需要另一位已開通帳號、有 {perm} 權限的人才能審核你的{what}")
 
     def create_leave_request(self, employee_id, shift_code, start_date, end_date, reason=None):
         """送出請假申請（Pending），回傳 request_id。"""
-        emp = self.get_employee(employee_id)
-        if emp is not None and not emp["parent_id"]:
-            raise ValueError("尚未設定主管，無法送出請假申請，請聯絡管理員")
-        if emp is not None and not self.leave_approvers(employee_id):
-            if emp["parent_id"] != employee_id:
-                raise ValueError(f"主管 {emp['parent_id']} {emp['parent_name'] or ''} 目前無法登入審核"
-                                 "（未設定密碼、已離職或沒有 LEAVE_APPROVE），請聯絡管理員")
-            raise ValueError("你是最高主管，需要另一位已開通帳號、有 LEAVE_APPROVE 權限的人才能審核你的請假")
-        _, days = self.plan_leave(employee_id, shift_code, start_date, end_date)
+        self._check_can_submit(employee_id, "LEAVE_APPROVE", "請假")
+        _, days, _ = self.plan_leave(employee_id, shift_code, start_date, end_date)
         hit = self.leave_overlap(employee_id, start_date, end_date)
         if hit:
             raise ValueError(f"日期與申請單 {hit} 重疊")
@@ -832,33 +1419,26 @@ class RosterDB:
         return self.conn.execute("SELECT * FROM fact_leave_request WHERE request_id = ?", (request_id,)).fetchone()
 
     def leave_approvers(self, employee_id):
-        """目前能審核此員工請假的人：能登入、有 LEAVE_APPROVE、不是本人；
-        有主管時只有主管，最高主管（或舊資料沒有主管）時是其他所有符合條件的人。"""
-        emp = self.get_employee(employee_id)
-        rows = self.conn.execute("SELECT * FROM dim_employee WHERE employee_id != ? ORDER BY employee_id",
-                                 (employee_id,)).fetchall()
-        if emp["parent_id"] and emp["parent_id"] != employee_id:
-            rows = [r for r in rows if r["employee_id"] == emp["parent_id"]]
-        return [r for r in rows if self.can_login(r) and "LEAVE_APPROVE" in parse_permissions(r["permission"])]
+        return self._approvers(employee_id, "LEAVE_APPROVE")
 
-    def _check_approver(self, req, approver_id):
-        """不能審自己的假；由申請人的主管（parent_id）審核。
-        最高主管（parent_id 是自己）或舊資料沒有主管時，其他有 LEAVE_APPROVE 的人都能審。"""
+    def _check_approver(self, req, approver_id, what="請假"):
+        """不能審自己的申請；由申請人的主管（parent_id）審核。
+        最高主管（parent_id 是自己）或舊資料沒有主管時，其他有審核權限的人都能審。"""
         if req["employee_id"] == approver_id:
-            raise ValueError("不能審核自己的請假申請")
+            raise ValueError(f"不能審核自己的{what}申請")
         emp = self.get_employee(req["employee_id"])
         if emp["parent_id"] and emp["parent_id"] not in (emp["employee_id"], approver_id):
             raise ValueError(f"此申請應由主管 {emp['parent_id']} {emp['parent_name'] or ''} 審核")
 
-    def _set_request_status(self, request_id, from_status, sets, args):
+    def _set_request_status(self, request_id, from_status, sets, args, table="fact_leave_request"):
         """只在狀態仍是 from_status 時更新，避免兩人同時審核同一張申請。"""
-        cur = self.conn.execute(f"UPDATE fact_leave_request SET {sets} WHERE request_id = ? AND status = ?",
+        cur = self.conn.execute(f"UPDATE {table} SET {sets} WHERE request_id = ? AND status = ?",
                                 list(args) + [request_id, from_status])
         if cur.rowcount != 1:
             raise ValueError(f"申請單 {request_id} 狀態已被其他人變更，請重新整理")
 
-    def _request_in(self, request_id, *statuses):
-        req = self.get_leave_request(request_id)
+    def _request_in(self, request_id, *statuses, table="fact_leave_request"):
+        req = self.conn.execute(f"SELECT * FROM {table} WHERE request_id = ?", (request_id,)).fetchone()
         if req is None:
             raise ValueError(f"找不到申請單 {request_id}")
         if req["status"] not in statuses:
@@ -870,7 +1450,7 @@ class RosterDB:
         req = self._request_in(request_id, "Pending")
         self._check_approver(req, approver_id)
         try:
-            rows, days = self.plan_leave(req["employee_id"], req["shift_code"],
+            rows, days, _ = self.plan_leave(req["employee_id"], req["shift_code"],
                                          dt.date.fromisoformat(req["start_date"]), dt.date.fromisoformat(req["end_date"]))
             remarks = f"{request_id}：{req['reason']}" if req["reason"] else request_id
             for row in rows:
@@ -898,7 +1478,7 @@ class RosterDB:
 
     def cancel_leave_request(self, request_id, actor_id, as_approver=False, note=None):
         """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消，
-        並把該申請寫入的班表還原為預設班別（沒有預設班別時刪除該天）。回傳還原天數。"""
+        並把該申請寫入的班表還原為原本的班（舊資料沒有記錄時用預設班別；都沒有時刪除該天）。回傳還原天數。"""
         req = self._request_in(request_id, "Pending", "Approved")
         own_pending = req["status"] == "Pending" and req["employee_id"] == actor_id
         if not own_pending:
@@ -908,13 +1488,17 @@ class RosterDB:
         default = self.get_employee(req["employee_id"])["default_shift_code"]
         restored = 0
         try:
-            for r in self.conn.execute("SELECT roster_key, roster_date FROM fact_roster WHERE leave_request_id = ?",
-                                       (request_id,)).fetchall():
+            for r in self.conn.execute(
+                    "SELECT roster_key, roster_date, base_shift_code FROM fact_roster WHERE leave_request_id = ?",
+                    (request_id,)).fetchall():
                 try:
-                    if not default:
-                        raise ValueError("沒有預設班別")
-                    row, _ = self.build_roster_row(req["employee_id"], default, dt.date.fromisoformat(r["roster_date"]),
-                                                   remarks=f"{request_id} 已取消，還原預設班別")
+                    # 有記錄原本的班就還原原本的班；舊資料沒有時還原為預設班別
+                    restore = r["base_shift_code"] or default
+                    if not restore:
+                        raise ValueError("沒有原本的班也沒有預設班別")
+                    what = "原本的班" if r["base_shift_code"] else "預設班別"
+                    row, _ = self.build_roster_row(req["employee_id"], restore, dt.date.fromisoformat(r["roster_date"]),
+                                                   remarks=f"{request_id} 已取消，還原{what}")
                     self.upsert_roster(row)
                 except ValueError:
                     self.conn.execute("DELETE FROM fact_roster WHERE roster_key = ?", (r["roster_key"],))

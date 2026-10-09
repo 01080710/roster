@@ -8,6 +8,10 @@
 *.sqlite
 *.sqlite3
 backups/
+# 日誌：資料夾以員工 email 命名，內容含操作紀錄（ROSTER_LOG_DIR 改到其他位置時也請排除）
+logs/
+test_logs/
+*.log
 
 # 匯出檔（排班總覽、審核紀錄、主檔匯出都可能含個資）
 *.csv
@@ -30,4 +34,15 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------
+# 編輯器與系統
+# ---------------------------------------------------------------
 .DS_Store
+.idea/
+# Claude Code 的個人設定（共用設定 .claude/settings.json 可以進版控）
+.claude/settings.local.json
