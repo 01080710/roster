@@ -69,10 +69,10 @@
   </div>
 
   {% if error %}<div class="banner">{{ error }}</div>{% endif %}
-  {% if msg %}<div class="banner {% if not msg_error %}info{% endif %}">{{ msg }}</div>{% endif %}
+  {% from "_messages.html" import flashes %}{{ flashes('info') }}
 
   {% if can('USER_CREATE') %}
-  <form class="card" method="post">
+  <form class="card" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h2>提交班表</h2>
     <div class="grid">
       <div>
@@ -201,7 +201,7 @@
         <td class="msg">{{ o.remarks or '' }}{% if o.check_flag %}<span class="flag">{{ (' ；' if o.remarks else '') ~ o.check_flag }}</span>{% endif %}</td>
         {% if can('USER_EDIT') %}<td>{% if not o.overtime_request_id %}
           <form method="post" action="{{ url_for('overtime.overtime_record_delete', overtime_key=o.overtime_key) }}"
-                data-confirm="確定刪除 {{ o.overtime_date }} 的加班？">
+                data-confirm="確定刪除 {{ o.overtime_date }} 的加班？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="link">刪除</button>
           </form>{% endif %}</td>{% endif %}
       </tr>
@@ -215,7 +215,7 @@
 
   {% if can('USER_EDIT') %}
   <dialog id="edit_dialog"{% if edit %} data-open='{{ edit|tojson }}' data-error="{{ edit_error or '' }}"{% endif %}>
-    <form method="post">
+    <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="head">
         <h2>修改排班</h2>
         <button type="button" class="close" data-close aria-label="關閉">×</button>

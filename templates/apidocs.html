@@ -1,0 +1,17 @@
+<!doctype html>
+{# 不套 base.html：app.css 對 button / table / input 的全域樣式會干擾 Swagger UI #}
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API 文件 · Vantage Roster Situation</title>
+<link rel="stylesheet" href="{{ url_for('apidocs.swagger_ui', filename='swagger-ui.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='apidocs.css') }}">
+</head>
+<body>
+<nav class="apidocs-nav"><a href="{{ url_for('roster.index') }}">← 回到排班總覽</a></nav>
+<div id="swagger" data-spec-url="{{ url_for('apidocs.openapi_json') }}" data-csrf="{{ csrf_token() }}"></div>
+<script src="{{ url_for('apidocs.swagger_ui', filename='swagger-ui-bundle.js') }}"></script>
+<script src="{{ url_for('static', filename='apidocs.js') }}"></script>
+</body>
+</html>

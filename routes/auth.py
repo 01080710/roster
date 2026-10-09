@@ -2,6 +2,10 @@
 import datetime as dt
 import hashlib
 import logging
+import math
+import threading
+import time
+from urllib.parse import urlsplit
 
 import jwt
 from flask import Blueprint, g, jsonify, redirect, render_template, request, url_for
@@ -87,17 +91,42 @@ def forbidden(_):
 
 @bp.route("/login", methods=["GET", "POST"])
 def login():
+    """登入頁
+    ---
+    get:
+      summary: 顯示登入頁
+      parameters:
+        - {name: next, in: query, schema: {type: string}, description: 登入成功後要回到的站內網址，例如 /leave}
+        - {name: expired, in: query, schema: {type: string}, description: 有值時顯示「登入已逾時」}
+      responses:
+        200: {description: 登入頁（HTML）}
+    post:
+      summary: 送出帳號密碼登入（網頁）
+      description: 成功時把 JWT 存進 HttpOnly cookie，再導向 next 或排班總覽。
+      parameters:
+        - {name: next, in: query, schema: {type: string}, description: 登入成功後要回到的站內網址}
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, example: you@example.com}
+                password: {type: string, format: password}
+      responses:
+        302: {description: 登入成功：設定 cookie 並導向 next 或排班總覽}
+        200: {description: 帳號或密碼錯誤：重新顯示登入頁與錯誤訊息}
+    """
     error = None
     notice = "登入已逾時，請重新登入" if request.args.get("expired") else None
     if request.method == "POST":
-        emp = db().authenticate(request.form.get("email"), request.form.get("password"))
+        emp, error, _ = _try_login(request.form.get("email"), request.form.get("password"))
         if emp is None:
-            error, notice = "帳號或密碼錯誤，或帳號尚未開通", None
-            _audit_login_failed(request.form.get("email"))
+            notice = None
         else:
             audit("登入", "login", user=emp["email"], via="web")
-            nxt = request.args.get("next") or ""
-            resp = redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("roster.index"))
+            resp = redirect(_safe_next(request.args.get("next")))
             resp.set_cookie(config.JWT_COOKIE_NAME, issue_token(emp),
                             max_age=config.JWT_EXPIRE_MINUTES * 60, httponly=True,
                             secure=config.JWT_COOKIE_SECURE, samesite=config.JWT_COOKIE_SAMESITE)
@@ -107,15 +136,104 @@ def login():
 
 @bp.post("/api/login")
 def api_login():
-    """{"email": "...", "password": "..."} → {"access_token": "...", "token_type": "Bearer", "expires_in": 1800}"""
+    """取得 token（外部程式用）
+    之後每次呼叫帶 `Authorization: Bearer <access_token>`；token 到期後重新呼叫一次。
+    ---
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [email, password]
+            properties:
+              email: {type: string, example: you@example.com}
+              password: {type: string, format: password}
+    responses:
+      200:
+        description: 登入成功
+        content:
+          application/json:
+            example: {ok: true, access_token: eyJhbGciOiJIUzI1NiIs..., token_type: Bearer, expires_in: 1800}
+      401:
+        description: 帳號或密碼錯誤，或帳號尚未開通（沒有密碼、已離職）
+        content:
+          application/json:
+            example: {ok: false, error: 帳號或密碼錯誤，或帳號尚未開通}
+      429:
+        description: 同一帳號短時間內失敗太多次，暫時鎖定（次數與時間見 config.LOGIN_*）
+        content:
+          application/json:
+            example: {ok: false, error: 登入失敗次數過多，請 15 分鐘後再試}
+    """
     body = request.get_json(silent=True) or {}
-    emp = db().authenticate(body.get("email"), body.get("password"))
+    emp, error, status = _try_login(body.get("email"), body.get("password"))
     if emp is None:
-        _audit_login_failed(body.get("email"))
-        return jsonify({"ok": False, "error": "帳號或密碼錯誤，或帳號尚未開通"}), 401
+        return jsonify({"ok": False, "error": error}), status
     audit("登入", "login", user=emp["email"], via="api")
     return jsonify({"ok": True, "access_token": issue_token(emp), "token_type": "Bearer",
                     "expires_in": config.JWT_EXPIRE_MINUTES * 60})
+
+
+def _safe_next(nxt):
+    """登入後只導回站內路徑；擋掉 //evil.com、/\\evil.com、https://evil.com 這類會跳到外部網站的網址。"""
+    if nxt and nxt.startswith("/") and "\\" not in nxt and not any(c < " " for c in nxt):
+        parts = urlsplit(nxt)
+        if not parts.scheme and not parts.netloc:
+            return nxt
+    return url_for("roster.index")
+
+
+# 登入失敗次數限制：同一帳號 LOGIN_WINDOW_MINUTES 內失敗 LOGIN_MAX_FAILURES 次，鎖 LOGIN_LOCK_MINUTES。
+# 記在記憶體（waitress 是單一行程多執行緒，所以要加鎖），重開網站會歸零。
+_failures = {}          # 帳號 → 最近幾次失敗的時間
+_locked_until = {}      # 帳號 → 解鎖時間
+_limit_lock = threading.Lock()
+
+
+def _locked_minutes(key):
+    """還要鎖幾分鐘；沒有鎖定回傳 0。"""
+    with _limit_lock:
+        left = _locked_until.get(key, 0) - time.monotonic()
+        if left <= 0:
+            _locked_until.pop(key, None)
+            return 0
+        return math.ceil(left / 60)
+
+
+def _record_failure(key):
+    """記一次失敗；達到上限時鎖定並回傳 True。"""
+    now, window = time.monotonic(), config.LOGIN_WINDOW_MINUTES * 60
+    with _limit_lock:
+        for k in [k for k, ts in _failures.items() if now - ts[-1] >= window]:   # 清掉過期的，避免越存越多
+            del _failures[k]
+        recent = [t for t in _failures.get(key, []) if now - t < window] + [now]
+        if len(recent) >= config.LOGIN_MAX_FAILURES:
+            _locked_until[key] = now + config.LOGIN_LOCK_MINUTES * 60
+            _failures.pop(key, None)
+            return True
+        _failures[key] = recent
+        return False
+
+
+def _try_login(login, password):
+    """網頁與 API 共用：驗證帳密並套用失敗次數限制。回傳 (員工, 錯誤訊息, HTTP 狀態碼)。
+    鎖定期間不檢查密碼，猜對也進不去。"""
+    key = (login or "").strip().lower()
+    wait = _locked_minutes(key)
+    if wait:
+        audit("登入被拒：帳號暫時鎖定", "login_locked", level=logging.WARNING, user=ANONYMOUS_USER, login=key)
+        return None, f"登入失敗次數過多，請 {wait} 分鐘後再試", 429
+    emp = db().authenticate(login, password)
+    if emp is None:
+        _audit_login_failed(login)
+        if _record_failure(key):
+            audit("登入失敗次數過多，帳號暫時鎖定", "login_lock", level=logging.WARNING, user=ANONYMOUS_USER,
+                  login=key, minutes=config.LOGIN_LOCK_MINUTES)
+        return None, "帳號或密碼錯誤，或帳號尚未開通", 401
+    with _limit_lock:
+        _failures.pop(key, None)
+    return emp, None, 200
 
 
 def _audit_login_failed(login):
@@ -125,6 +243,12 @@ def _audit_login_failed(login):
 
 @bp.post("/logout")
 def logout():
+    """登出
+    清除 token cookie。JWT 本身沒有存在伺服器，所以外部程式拿到的 token 在到期前仍然有效。
+    ---
+    responses:
+      302: {description: 清除 cookie 並導向登入頁}
+    """
     if g.user is not None:
         audit("登出", "logout")
     resp = redirect(url_for("auth.login"))

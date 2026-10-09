@@ -39,7 +39,8 @@
 | [static/](static/) | CSS 與各頁 JS（CSP 禁止 inline script / style） |
 | [forms.py](forms.py) | 表單 / JSON 輸入解析與表單預設值 |
 | [views.py](views.py) | 畫面與匯出用的資料轉換、模板 filter |
-| [routes/](routes/) | 依業務拆分的網址與 API：`auth`（登入、身分驗證）、`roster`（排班總覽、提交班表）、`leave`（請假）、`overtime`（加班）、`dim`（主檔）；共用的權限檢查、日誌與 CSV 下載在 `common` |
+| [tests/](tests/) | 自動化測試（pytest）：班表規則、請假 / 加班流程、網頁安全防護；每個測試用全新的暫存資料庫，不會動到 `roster.db` |
+| [routes/](routes/) | 依業務拆分的網址與 API：`auth`（登入、身分驗證）、`roster`（排班總覽、提交班表）、`leave`（請假）、`overtime`（加班）、`dim`（主檔）、`apidocs`（API 文件）；共用的權限檢查、日誌與 CSV 下載在 `common` |
 
 ## 1. 業務流程
 
@@ -468,6 +469,8 @@ stateDiagram-v2
 
 點總覽某人的「上班 / 請假 / 加班」數字，會跳出該員工在目前年份或月份的逐日明細；點欄位標題則列出所有人（多一欄姓名）。資料由 `GET /api/roster/detail?kind=work|leave|ot&year=&month=&employee_id=` 提供（需 `USER_VIEW`）。
 
+備註欄可能含請假 / 加班原因（核准時會寫進備註），屬於個資：別人的備註只有**本人與能審核他的主管**看得到，其他人看到的是空白；檢查提醒照常顯示。
+
 | 項目 | 列出的日子 | 欄位 |
 |---|---|---|
 | 上班 | `work_fraction > 0` | 日期、星期、日別（含假日名稱）、班別、上班時間、工時、天數、備註 / 檢查 |
@@ -485,6 +488,8 @@ stateDiagram-v2
 - 網頁：登入後 token 存在 HttpOnly cookie（`access_token`），到期自動回到登入頁。
 - API：`POST /api/login` 取得 token，之後帶 `Authorization: Bearer <token>`。
 - token 內含 `sub`（employee_id）、`iat`、`exp`，以及密碼指紋。每次請求都會重新讀取 `dim_employee`，所以修改密碼、設定離職或調整 `permission` 都會立即生效。
+- **登入失敗次數限制**：同一帳號 15 分鐘內失敗 5 次，就鎖定 15 分鐘（網頁與 API 共用，數字見 `config.LOGIN_*`）。鎖定期間密碼正確也不能登入，API 回 429。記錄存在記憶體，重新啟動網站會歸零。
+- **登入後跳轉**：登入頁的 `next` 只接受站內路徑，指向其他網站的網址一律改回排班總覽，避免被拿來把人導到假網站。
 
 `permission` 預設值依 `role` 決定，可在「員工」頁面逐人調整：
 
@@ -515,6 +520,7 @@ stateDiagram-v2
 | 班別 / 員工 / 假日主檔（查看、編輯） | `USER_VIEW` + `USER_EDIT` |
 | 主檔新增 | 再加上 `USER_CREATE` |
 | 主檔刪除 | 再加上 `USER_DELETE` |
+| API 文件（`/apidocs`） | `USER_VIEW` + `USER_EDIT` |
 
 ```mermaid
 flowchart LR
@@ -529,6 +535,10 @@ flowchart LR
     perm -->|OT_APPROVE| ot_approve["審核下屬加班<br/>取消已核准加班"]
 ```
 
+### API 文件
+
+導覽列的「API 文件」（`/apidocs`）列出系統所有網址，依業務分組，可以直接在頁面上試打 API（會真的寫入資料）。清單從程式自動產生，新增網址會自動出現；每支的參數、回傳範例與說明寫在 [routes/](routes/) 各函式說明文字的 `---` 之後（YAML 格式），需要的權限與程式位置也會自動帶出。
+
 ### 網頁的瀏覽器保護
 
 每個頁面都會附上安全設定（Content-Security-Policy，內容見 `config.CONTENT_SECURITY_POLICY`），要求瀏覽器：
@@ -536,7 +546,11 @@ flowchart LR
 - 只執行本系統 [static/](static/) 資料夾裡的程式與樣式。就算有人在備註、請假原因等欄位填入惡意程式碼，瀏覽器也不會執行。
 - 不允許其他網站把本系統嵌進它們的頁面（防止偽裝成本系統騙使用者點擊）。
 
-開發時要注意：頁面模板（[templates/](templates/)）裡不能直接寫程式或樣式（`<script>…</script>`、`<style>`、`onclick=` 這類寫法會被瀏覽器擋掉），要放到 `static/` 的檔案；頁面需要的伺服器資料用 `data-*` 屬性傳給程式。送出前的確認視窗用 `<form data-confirm="訊息">`，下拉選單選了就送出用 `<select data-autosubmit>`。
+**防止冒用登入身分送出表單（CSRF）**：其他網站可能誘導已登入的使用者，在背景替他送出表單（例如核准請假）。所以每個 POST 表單都帶一組隨機的 `csrf_token`，伺服器比對不符就拒絕，畫面顯示「頁面已過期」，重新整理後再送即可。用 cookie 登入呼叫 API 時，要帶 `X-CSRF-Token` header；用 `Authorization: Bearer` 的外部程式不受影響。
+
+**頁面上方的提示訊息**（例如「已送出申請單」）存在簽章過的 session 裡，只顯示一次，不能從網址帶入，避免有人做出顯示假訊息的連結。
+
+開發時要注意：頁面模板（[templates/](templates/)）裡不能直接寫程式或樣式（`<script>…</script>`、`<style>`、`onclick=` 這類寫法會被瀏覽器擋掉），要放到 `static/` 的檔案；頁面需要的伺服器資料用 `data-*` 屬性傳給程式。送出前的確認視窗用 `<form data-confirm="訊息">`，下拉選單選了就送出用 `<select data-autosubmit>`。新增 POST 表單時，要在 `<form>` 裡放 `<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">`；導回頁面並顯示訊息用 `routes/common.py` 的 `redirect_msg()`。
 
 ### 匯出檔案
 
@@ -588,6 +602,8 @@ flowchart LR
 - **還原**：停止伺服器，把要用的備份檔複製回專案資料夾並改名為 `roster.db`，再啟動。
 
 開發時 debug 模式每次自動重新載入都會備份一次；因為同一天只留最新一份，不會擠掉前幾天的備份。
+
+資料庫使用 SQLite 的 WAL 模式（多人同時使用時，讀取不會被寫入卡住），所以 `roster.db` 旁邊會多出 `roster.db-wal`、`roster.db-shm` 兩個檔案，這是正常的，不要刪除。手動複製資料庫時，請先停止伺服器，或直接用 `py -3.12 main.py backup`。WAL 不支援網路磁碟機，`roster.db` 要放在伺服器本機的磁碟上。
 
 ## 10. 日誌
 
@@ -643,6 +659,9 @@ GROUP BY path ORDER BY avg_ms DESC LIMIT 10;
 - `fact_roster` 會複製員工與班別的部分欄位（姓名、辦公室、班別時間、工時等）。之後修改維度表，已寫入的排班不會自動更新，要重新提交那幾天才會套用。
 - `base_shift_code` 上線前核准的請假沒有記錄原本的班：取消時仍還原為**目前的**預設班別，半天假也看不到請假時段。
 - 外鍵限制只在連線執行 `PRAGMA foreign_keys = ON` 時生效（`RosterDB` 已預設開啟）。所以刪除仍被參照的員工（有排班、有請假申請或仍是別人的主管）或班別會失敗。
+- **啟動方式**：`py -3.12 main.py` 以 waitress 啟動，可正式使用。開發時設定 `ROSTER_DEBUG=1` 改用 Flask 開發伺服器（改程式自動重新載入、顯示錯誤細節），但它不安全，**不可對外開放**。
+- **測試**：`pip install -r requirements-dev.txt` 後執行 `pytest`。改了 `db.py` 的規則或 routes 之後跑一次，確認沒有改壞既有功能。
+- 申請單號依當天流水號產生；兩人同時送出撞號時會自動換下一號重試。
 - CHECK 限制只在建立資料表時生效；修改 `config.py` 的選項後，既有 `roster.db` 的限制不會自動改變。
 - 索引：`ix_roster_emp_date` 建在 `fact_roster (employee_id, roster_date)`；`ix_leave_emp_date` 建在 `fact_leave_request (employee_id, start_date, end_date)`；`ix_leave_status` 建在 `fact_leave_request (status)`；`ix_overtime_emp_date` 建在 `fact_overtime (employee_id, overtime_date)`；`ix_ot_request_emp_date` 建在 `fact_overtime_request (employee_id, start_date, end_date)`；`ix_ot_request_status` 建在 `fact_overtime_request (status)`。
 

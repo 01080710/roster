@@ -1,0 +1,4 @@
+{# routes/common.py 的 redirect_msg() 留下的一次性訊息。ok_class：成功訊息的樣式（ok 綠色 / info 藍色），錯誤一律紅色 #}
+{% macro flashes(ok_class='ok') -%}
+{% for category, text in get_flashed_messages(with_categories=true) %}<div class="banner {% if category != 'error' %}{{ ok_class }}{% endif %}">{{ text }}</div>{% endfor %}
+{%- endmacro %}

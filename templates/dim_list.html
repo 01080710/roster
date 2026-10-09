@@ -3,7 +3,7 @@
 {% block content %}
   <h1>{{ meta.label }}</h1>
   <p class="sub">{{ meta.table }}，共 {{ rows|length }} 筆。點「編輯」查看完整欄位並修改。</p>
-  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+  {% from "_messages.html" import flashes %}{{ flashes() }}
   <div class="card">
     <div class="head">
       <h2>資料列表</h2>

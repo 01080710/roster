@@ -1,12 +1,13 @@
-"""各 router 共用：資料庫連線、權限檢查、CSV 下載、日誌。"""
+"""各 router 共用：資料庫連線、權限檢查、CSRF、訊息、CSV 下載、日誌。"""
 import csv
 import functools
 import io
 import logging
+import secrets
 import time
 
-from flask import (Response, abort, current_app, g, got_request_exception, has_request_context, jsonify,
-                   redirect, request, url_for)
+from flask import (Response, abort, current_app, flash, g, got_request_exception, has_request_context, jsonify,
+                   redirect, render_template, request, session, url_for)
 
 import config
 import views
@@ -115,8 +116,45 @@ def require(*perms):
             if not can(*perms):
                 abort(403)
             return view(*args, **kwargs)
+        wrapper.required_perms = perms     # API 文件（routes/apidocs.py）用來列出需要的權限
         return wrapper
     return deco
+
+
+CSRF_FIELD = "csrf_token"          # 表單隱藏欄位
+CSRF_HEADER = "X-CSRF-Token"       # 或放在 header（API 文件的 Try it out）
+CSRF_EXEMPT = {"auth.api_login"}   # 回傳 token、不設 cookie，不怕被冒用
+
+
+def csrf_token():
+    """每個 session 一組隨機 token，模板用 {{ csrf_token() }} 放進每個 POST 表單。"""
+    if "csrf" not in session:
+        session["csrf"] = secrets.token_urlsafe(32)
+    return session["csrf"]
+
+
+def check_csrf():
+    """防止其他網站借用使用者的登入 cookie 送出表單（CSRF）：POST 必須帶回同一組 token。
+    用 Authorization: Bearer 的外部程式不會自動帶 cookie，不受這種攻擊，不檢查。"""
+    if request.method != "POST" or request.endpoint in CSRF_EXEMPT:
+        return None
+    if request.headers.get("Authorization", "").lower().startswith("bearer "):
+        return None
+    expected = session.get("csrf")
+    sent = request.form.get(CSRF_FIELD) or request.headers.get(CSRF_HEADER)
+    if expected and sent and secrets.compare_digest(expected, sent):
+        return None
+    log.warning("CSRF token 不符", extra={"action": "csrf_failed"})
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": "缺少或錯誤的 CSRF token"}), 403
+    return render_template("forbidden.html", heading="頁面已過期",
+                           message="請重新整理頁面後再送出一次。"), 400
+
+
+def redirect_msg(endpoint, msg, error=False, **values):
+    """導回頁面並顯示一次訊息。訊息存在簽章過的 session，網址上帶不進來，別人無法偽造訊息。"""
+    flash(msg, "error" if error else "ok")
+    return redirect(url_for(endpoint, **values))
 
 
 def result_counts(results):

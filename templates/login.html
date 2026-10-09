@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}登入 · Vantage Roster Situation{% endblock %}
 {% block content %}
-  <form class="card login" method="post">
+  <form class="card login" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h1>登入</h1>
     <p class="sub">請使用員工 email 與密碼登入，登入有效 {{ jwt_expire_minutes }} 分鐘。</p>
     {% if notice %}<div class="banner info">{{ notice }}</div>{% endif %}

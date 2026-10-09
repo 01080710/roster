@@ -3,7 +3,8 @@
 
 安裝：pip install -r requirements.txt     （Windows 另需 pip install tzdata）
 設定密碼：py -3.12 main.py set-password <email 或 employee_id>
-執行：py -3.12 main.py
+執行：py -3.12 main.py                     （以 waitress 啟動，可正式使用）
+開發：$env:ROSTER_DEBUG = "1"; py -3.12 main.py   （Flask 開發伺服器：改程式自動重新載入，不可對外使用）
 開啟：http://127.0.0.1:5000（host / port 見 config.py）
 
 第一次執行會自動建立 roster.db，並寫入班別、假日與員工的初始資料。
@@ -30,6 +31,9 @@ from logger import cleanup_old_logs
 from routes.common import close_db, log
 
 app = Flask(__name__)     # 頁面模板在 templates/，CSS / JS 在 static/
+app.secret_key = config.JWT_SECRET_KEY    # 簽章 session cookie（一次性訊息、CSRF token）
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE=config.JWT_COOKIE_SAMESITE,
+                  SESSION_COOKIE_SECURE=config.JWT_COOKIE_SECURE)
 app.jinja_env.filters["utc_text"] = views.utc_text
 app.jinja_env.filters["edit_payload"] = views.edit_payload
 app.jinja_env.filters["days"] = views.days_text
@@ -135,4 +139,8 @@ if __name__ == "__main__":
             init_database()
             run_maintenance("啟動備份")
             start_maintenance_scheduler()
-        app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)
+        if config.DEBUG:
+            app.run(host=config.HOST, port=config.PORT, debug=True)
+        else:
+            from waitress import serve      # 正式用的 WSGI 伺服器（Flask 內建的只適合開發）
+            serve(app, host=config.HOST, port=config.PORT)

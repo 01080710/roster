@@ -23,9 +23,10 @@
   <a href="{{ url_for('dim.dim_list', kind=k) }}"
      {% if request.view_args and request.view_args.get('kind') == k %}class="on"{% endif %}>{{ label }}</a>
   {% endfor %}
+  {% if can('USER_EDIT') %}<a href="{{ url_for('apidocs.apidocs') }}">API 文件</a>{% endif %}
   <button type="button" class="theme" id="theme_toggle"></button>
   {% if current_user %}
-  <form class="who" method="post" action="{{ url_for('auth.logout') }}">
+  <form class="who" method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <span>{{ current_user.full_name }} · {{ current_user.role or '—' }}</span>
     {% if token_exp %}<span class="exp" id="token_exp" data-exp="{{ token_exp }}"></span>{% endif %}
     <button type="submit">登出</button>

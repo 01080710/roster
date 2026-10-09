@@ -23,6 +23,42 @@ def pivot_period():
 @bp.route("/", methods=["GET", "POST"])
 @require("USER_VIEW")
 def index():
+    """排班總覽
+    ---
+    get:
+      summary: 排班總覽頁
+      description: 年度 / 月份總覽（所有人），以及自己的「查詢與修改」與加班紀錄。
+      parameters:
+        - {name: year, in: query, schema: {type: integer, example: 2026}, description: 總覽年份，預設今年}
+        - {name: month, in: query, schema: {type: integer, minimum: 1, maximum: 12}, description: 總覽月份，空白為全年}
+        - {name: view_from, in: query, schema: {type: string, format: date}, description: 「查詢與修改」日期起}
+        - {name: view_to, in: query, schema: {type: string, format: date}, description: 「查詢與修改」日期迄}
+        - {name: edit, in: query, schema: {type: string, example: EMP0001-20261030}, description: 載入後直接開啟這筆 roster_key 的修改彈窗（需 USER_EDIT）}
+      responses:
+        200: {description: 排班總覽頁（HTML）}
+    post:
+      summary: 提交班表 / 修改一天的班（網頁表單）
+      description: |
+        不帶 edit_key 為「提交班表」（需 USER_CREATE），逐日寫入日期區間；帶 edit_key 為修改彈窗（需 USER_EDIT），只改那一天。
+        只能提交與修改自己的排班。結果直接顯示在同一頁，不會導回。
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [employee_id, shift_code, start_date]
+              properties:
+                employee_id: {type: string, example: EMP0001, description: 必須是登入者本人}
+                shift_code: {type: string, example: S0918_FD}
+                start_date: {type: string, format: date}
+                end_date: {type: string, format: date, description: 只排一天可留空}
+                leave_approval_status: {type: string, enum: [Approved, Pending, Rejected], description: 班別為請假時使用}
+                remarks: {type: string}
+                skip_non_working: {type: string, description: 有送出這個欄位（任何值）就略過休息日與國定假日}
+                edit_key: {type: string, example: EMP0001-20261030, description: 修改彈窗用的 roster_key}
+      responses:
+        200: {description: 排班總覽頁，含逐日提交結果或錯誤訊息}
+    """
     uid = g.user["employee_id"]
     employees, shift_groups = db().form_options()
     employees = [e for e in employees if e["employee_id"] == uid]   # 本頁所有「成員」下拉只有登入者
@@ -86,14 +122,23 @@ def index():
                            results=results, summary=summary, error=error,
                            edit=edit, edit_error=edit_error,
                            recent=recent, recent_ot=recent_ot, view=view, pivot=pivot,
-                           msg=request.args.get("msg"), msg_error=request.args.get("err") == "1",
                            situation_labels=config.SITUATION_LABELS)
 
 
 @bp.get("/export/roster")
 @require("USER_VIEW")
 def export_roster():
-    """排班總覽：依目前選的年份 / 月份匯出。"""
+    """匯出排班總覽（CSV）
+    依目前選的年份 / 月份匯出，欄位同畫面。
+    ---
+    parameters:
+      - {name: year, in: query, schema: {type: integer, example: 2026}, description: 預設今年}
+      - {name: month, in: query, schema: {type: integer, minimum: 1, maximum: 12}, description: 空白為全年}
+    responses:
+      200:
+        description: CSV 檔（UTF-8 BOM），檔名如 roster_2026-10.csv
+        content: {text/csv: {}}
+    """
     year, month = pivot_period()
     view = views.pivot_to_view(*db().roster_pivot(year, month), year, month)
     columns, rows = views.pivot_export(view)
@@ -104,7 +149,34 @@ def export_roster():
 @bp.get("/api/roster/detail")
 @require("USER_VIEW")
 def api_roster_detail():
-    """總覽小計的逐日明細：?kind=work|leave|ot&year=2026&month=10&employee_id=EMP0003（不帶 employee_id = 所有人）"""
+    """總覽小計的逐日明細
+    排班總覽點「上班 / 請假 / 加班」數字時呼叫。columns 是表頭，rows[].cells 與 columns 一一對應；不帶 employee_id 時多一欄姓名。
+    備註可能含請假 / 加班原因：別人的備註只有能審核他的主管看得到，其他人看到的是空白（檢查提醒照常顯示）。
+    ---
+    parameters:
+      - {name: kind, in: query, required: true, schema: {type: string, enum: [work, leave, ot]}}
+      - {name: year, in: query, schema: {type: integer, example: 2026}, description: 預設今年}
+      - {name: month, in: query, schema: {type: integer, minimum: 1, maximum: 12}, description: 空白為全年}
+      - {name: employee_id, in: query, schema: {type: string, example: EMP0001}, description: 不帶 = 所有人}
+    responses:
+      200:
+        description: 明細
+        content:
+          application/json:
+            example:
+              ok: true
+              title: Peter Chang · 2026 年 · 請假明細（共 0.5 天）
+              columns: [日期, 星期, 日別, 班別, 時間, 工時, 天數, 狀態, 申請單, 備註 / 檢查]
+              rows:
+                - pending: false
+                  cells: ["2026-10-08", Thu, Work Day, AL_H1 · 1st 0.5 AL, "", "", "0.5", Approved, LR-20261008-002, LR-20261008-002：海外旅遊]
+      400: {$ref: "#/components/responses/BadRequest"}
+      404:
+        description: 找不到員工
+        content:
+          application/json:
+            example: {ok: false, error: 找不到 EMP9999}
+    """
     kind = request.args.get("kind")
     if kind not in views.DETAIL_LABELS:
         return jsonify({"ok": False, "error": "kind 必須是 work / leave / ot"}), 400
@@ -119,14 +191,51 @@ def api_roster_detail():
     else:
         title = f"所有人 · {period}"
     rows = db().roster_detail(kind, year, month, emp_id)
+    visible = {}    # 備註可能含請假 / 加班原因（個資）：別人的只有他的主管看得到
+    for r in rows:
+        if r["employee_id"] not in visible:
+            visible[r["employee_id"]] = db().can_view_reasons(g.user["employee_id"], r["employee_id"])
+        if not visible[r["employee_id"]]:
+            r["remarks"] = None
     return jsonify(views.detail_view(kind, rows, title, all_people=emp_id is None))
 
 
 @bp.post("/api/roster")
 @require("USER_CREATE")
 def api_roster():
-    """JSON 介面（需登入：cookie 或 Authorization: Bearer <token>）。
-    {"employee_id":"EMP0004","shift_code":"S0918_FD","start_date":"2026-02-16","end_date":"2026-02-20"}"""
+    """提交班表
+    逐日寫入日期區間。沒有 USER_EDIT 時只能提交自己的、不能覆蓋已有排班；請假代碼需 LEAVE_APPROVE（其他人請走請假申請）；加班請改用 POST /api/overtime。
+    回傳每一天的結果：action 為 created / updated / skipped / error，row 是寫入後的 fact_roster 資料。
+    ---
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [employee_id, shift_code, start_date]
+            properties:
+              employee_id: {type: string, example: EMP0001}
+              shift_code: {type: string, example: S1501_FD}
+              start_date: {type: string, format: date, example: "2026-12-01"}
+              end_date: {type: string, format: date, example: "2026-12-02", description: 預設同 start_date}
+              leave_approval_status: {type: string, enum: [Approved, Pending, Rejected]}
+              remarks: {type: string}
+              skip_non_working: {type: boolean, default: true, description: 略過休息日與國定假日}
+    responses:
+      200:
+        description: 逐日結果
+        content:
+          application/json:
+            example:
+              ok: true
+              results:
+                - action: created
+                  date: "2026-12-01"
+                  message: ""
+                  row: {roster_key: EMP0001-20261201, shift_code: S1501_FD, day_type: Work Day, planned_start_local: "2026-12-01 15:00", planned_end_local: "2026-12-02 01:00", planned_hours: 9.0, work_fraction: 1.0, "...": "..."}
+      400: {$ref: "#/components/responses/BadRequest"}
+    """
     try:
         p = forms.parse_api_payload(request.get_json(force=True))
         check_own_employee(p["employee_id"])

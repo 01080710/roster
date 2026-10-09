@@ -7,7 +7,7 @@
 {% block content %}
   <h1>加班</h1>
   <p class="sub">送出申請後由主管審核，核准後才寫入加班紀錄；加班和班表分開存，不會覆蓋當天的班。待審核的加班會在排班總覽以虛線框顯示，不計入加班天數。</p>
-  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+  {% from "_messages.html" import flashes %}{{ flashes() }}
 
   {% if can('OT_APPROVE') %}
   <div class="card">
@@ -25,7 +25,7 @@
         <td>{{ amount(q) }}</td>
         <td class="msg">{{ q.reason or '' }}</td>
         <td>
-          <form class="inline" method="post" action="{{ url_for('overtime.overtime_decide', request_id=q.request_id) }}">
+          <form class="inline" method="post" action="{{ url_for('overtime.overtime_decide', request_id=q.request_id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="decision_note" placeholder="審核意見（選填）">
             <button name="decision" value="approve">核准</button>
             <button name="decision" value="reject" class="danger">駁回</button>
@@ -42,7 +42,7 @@
 
   {% if can('OT_APPLY') %}
   <form class="card" method="post" id="ot_form" data-slots-url="{{ url_for('overtime.api_overtime_slots') }}"
-        data-preview-url="{{ url_for('overtime.api_overtime_preview') }}">
+        data-preview-url="{{ url_for('overtime.api_overtime_preview') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h2>我的加班</h2>
     {% if error %}<div class="banner">{{ error }}</div>{% endif %}
     <div class="grid">
@@ -104,7 +104,7 @@
         <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Pending' %}
-          <form method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？">
+          <form method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="link">撤回</button>
           </form>{% endif %}</td>
       </tr>
@@ -138,7 +138,7 @@
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Approved' %}
           <form class="inline" method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}"
-                data-confirm="取消後會刪除這張單寫入的加班，確定取消 {{ q.request_id }}？">
+                data-confirm="取消後會刪除這張單寫入的加班，確定取消 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="note" placeholder="取消原因（選填）">
             <button type="submit" class="danger">取消</button>
           </form>{% endif %}</td>

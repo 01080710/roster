@@ -5,7 +5,7 @@
   <p class="sub">{{ meta.table }}</p>
   {% if error %}<div class="banner">{{ error }}</div>{% endif %}
 
-  <form class="card" method="post">
+  <form class="card" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="grid">
     {% for f in fields %}
       {% set v = values.get(f.name) %}
@@ -87,7 +87,7 @@
   </form>
 
   {% if key and can('USER_DELETE') %}
-  <form method="post" action="{{ url_for('dim.dim_delete', kind=kind) }}" data-confirm="確定刪除這筆資料？">
+  <form method="post" action="{{ url_for('dim.dim_delete', kind=kind) }}" data-confirm="確定刪除這筆資料？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="key" value="{{ key }}">
     <button type="submit" class="danger">刪除</button>
   </form>

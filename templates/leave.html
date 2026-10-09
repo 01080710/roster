@@ -5,7 +5,7 @@
 {% block content %}
   <h1>請假</h1>
   <p class="sub">送出申請後由主管審核，核准後才寫入班表；待審核的假會在排班總覽以虛線框顯示，不計入請假天數。</p>
-  {% if msg %}<div class="banner {% if not msg_error %}ok{% endif %}">{{ msg }}</div>{% endif %}
+  {% from "_messages.html" import flashes %}{{ flashes() }}
 
   {% if can('LEAVE_APPROVE') %}
   <div class="card">
@@ -24,7 +24,7 @@
         <td class="msg">{{ q.reason or '' }}</td>
         <td>已核准 {{ q.team_off }} 人 · 待審 {{ q.team_pending }} 人</td>
         <td>
-          <form class="inline" method="post" action="{{ url_for('leave.leave_decide', request_id=q.request_id) }}">
+          <form class="inline" method="post" action="{{ url_for('leave.leave_decide', request_id=q.request_id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="decision_note" placeholder="審核意見（選填）">
             <button name="decision" value="approve">核准</button>
             <button name="decision" value="reject" class="danger">駁回</button>
@@ -78,7 +78,7 @@
   </dialog>
 
   {% if can('LEAVE_APPLY') %}
-  <form class="card" method="post" id="leave_form" data-preview-url="{{ url_for('leave.api_leave_preview') }}">
+  <form class="card" method="post" id="leave_form" data-preview-url="{{ url_for('leave.api_leave_preview') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h2>我的請假</h2>
     {% if error %}<div class="banner">{{ error }}</div>{% endif %}
     <div class="grid">
@@ -130,7 +130,7 @@
         <td>{% if q.status == 'Pending' %}{% if q.waiting_for %}待 {{ q.waiting_for }} 審核{% else %}<span class="flag">目前沒有人能審核</span>{% endif %}{% else %}{{ q.approver_name or '' }}{% endif %}</td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Pending' %}
-          <form method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？">
+          <form method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}" data-confirm="確定撤回 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="link">撤回</button>
           </form>{% endif %}</td>
       </tr>
@@ -164,7 +164,7 @@
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Approved' %}
           <form class="inline" method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}"
-                data-confirm="取消後會把班表還原為預設班別，確定取消 {{ q.request_id }}？">
+                data-confirm="取消後會把班表還原為預設班別，確定取消 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="note" placeholder="取消原因（選填）">
             <button type="submit" class="danger">取消</button>
           </form>{% endif %}</td>

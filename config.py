@@ -19,7 +19,7 @@ def _env_bool(name, default):
 DB_PATH = os.environ.get("ROSTER_DB_PATH", os.path.join(BASE_DIR, "roster.db"))   
 HOST = os.environ.get("ROSTER_HOST", "127.0.0.1")                                
 PORT = int(os.environ.get("ROSTER_PORT", "5000"))                                 
-DEBUG = _env_bool("ROSTER_DEBUG", True)                                          
+DEBUG = _env_bool("ROSTER_DEBUG", False)    # 環境變數；只在本機開發時打開（會自動重新載入、顯示錯誤細節）                                          
 
 
 # 排班規則
@@ -70,6 +70,9 @@ PERMISSIONS = ["USER_VIEW", "USER_CREATE", "USER_EDIT", "USER_DELETE", "LEAVE_AP
 AGENT_ROLE = "Agent"
 AGENT_PERMISSIONS = ["USER_VIEW", "USER_CREATE", "LEAVE_APPLY", "OT_APPLY"]   # Agent 預設權限；其他角色預設 PERMISSIONS 全部
 PASSWORD_MIN_LENGTH = 8
+LOGIN_MAX_FAILURES = 5       # 同一帳號在 LOGIN_WINDOW_MINUTES 內登入失敗幾次就鎖定
+LOGIN_WINDOW_MINUTES = 15
+LOGIN_LOCK_MINUTES = 15      # 鎖定幾分鐘（網頁與 /api/login 共用）
 
 
 # JWT 驗證

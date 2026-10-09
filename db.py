@@ -389,6 +389,8 @@ class RosterDB:
     def init_db(self):
         """建立 / 升級資料表並寫入初始資料。回傳本次從舊班表搬到 fact_overtime 的 [(employee_id, 日期), ...]。"""
         conn = self.conn
+        # WAL：讀取不會被寫入卡住，多人同時使用較順；設定存在資料庫檔裡，之後的連線都沿用
+        conn.execute("PRAGMA journal_mode = WAL")
         had_leave_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fact_leave_request'").fetchone()
         had_ot_request_table = conn.execute(
@@ -854,20 +856,13 @@ class RosterDB:
         hit = self.overtime_overlap(employee_id, start_date, end_date)
         if hit:
             raise ValueError(f"日期與加班申請單 {hit} 重疊")
-        rid, now = self._next_request_id("fact_overtime_request", "OTR"), _now()
-        try:
-            self.conn.execute(
-                """INSERT INTO fact_overtime_request
-                   (request_id, employee_id, shift_code, start_time, end_time, start_date, end_date, days, hours,
-                    reason, status, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,'Pending',?,?)""",
-                (rid, employee_id, shift_code or None, start_time or None, end_time or None, _iso(start_date),
-                 _iso(end_date), days, hours, reason or None, now, now))
-            self.conn.commit()
-        except sqlite3.IntegrityError:      # 兩人同時送出拿到同一個單號
-            self.conn.rollback()
-            raise ValueError("送出時發生衝突，請再送一次") from None
-        return rid
+        return self._insert_request("fact_overtime_request", "OTR", lambda rid, now: self.conn.execute(
+            """INSERT INTO fact_overtime_request
+               (request_id, employee_id, shift_code, start_time, end_time, start_date, end_date, days, hours,
+                reason, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,'Pending',?,?)""",
+            (rid, employee_id, shift_code or None, start_time or None, end_time or None, _iso(start_date),
+             _iso(end_date), days, hours, reason or None, now, now)))
 
     def get_overtime_request(self, request_id):
         return self.conn.execute("SELECT * FROM fact_overtime_request WHERE request_id = ?", (request_id,)).fetchone()
@@ -1372,6 +1367,24 @@ class RosterDB:
             f"SELECT request_id FROM {table} WHERE request_id LIKE ?", (prefix + "%",))]
         return f"{prefix}{max(nums, default=0) + 1:03d}"
 
+    def _insert_request(self, table, code, insert, attempts=3):
+        """取號並寫入申請單，回傳 request_id。兩人同時送出可能拿到同一個單號：撞號時換下一號重試。"""
+        for _ in range(attempts):
+            rid = self._next_request_id(table, code)
+            try:
+                insert(rid, _now())
+                self.conn.commit()
+                return rid
+            except sqlite3.IntegrityError:
+                self.conn.rollback()
+        raise ValueError("送出時發生衝突，請再送一次")
+
+    def can_view_reasons(self, viewer_id, employee_id):
+        """請假 / 加班原因（核准時會寫進班表與加班的備註）屬於個資：只給本人與能審核他的主管看。"""
+        return viewer_id == employee_id or any(
+            a["employee_id"] == viewer_id for perm in ("LEAVE_APPROVE", "OT_APPROVE")
+            for a in self._approvers(employee_id, perm))
+
     def _approvers(self, employee_id, perm):
         """目前能審核此員工申請的人：能登入、有 perm、不是本人；
         有主管時只有主管，最高主管（或舊資料沒有主管）時是其他所有符合條件的人。"""
@@ -1402,18 +1415,11 @@ class RosterDB:
         hit = self.leave_overlap(employee_id, start_date, end_date)
         if hit:
             raise ValueError(f"日期與申請單 {hit} 重疊")
-        rid, now = self._next_request_id(), _now()
-        try:
-            self.conn.execute(
-                """INSERT INTO fact_leave_request
-                   (request_id, employee_id, shift_code, start_date, end_date, days, reason, status, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,'Pending',?,?)""",
-                (rid, employee_id, shift_code, _iso(start_date), _iso(end_date), days, reason or None, now, now))
-            self.conn.commit()
-        except sqlite3.IntegrityError:      # 兩人同時送出拿到同一個單號
-            self.conn.rollback()
-            raise ValueError("送出時發生衝突，請再送一次") from None
-        return rid
+        return self._insert_request("fact_leave_request", "LR", lambda rid, now: self.conn.execute(
+            """INSERT INTO fact_leave_request
+               (request_id, employee_id, shift_code, start_date, end_date, days, reason, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,'Pending',?,?)""",
+            (rid, employee_id, shift_code, _iso(start_date), _iso(end_date), days, reason or None, now, now)))
 
     def get_leave_request(self, request_id):
         return self.conn.execute("SELECT * FROM fact_leave_request WHERE request_id = ?", (request_id,)).fetchone()
