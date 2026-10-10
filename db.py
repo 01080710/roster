@@ -372,9 +372,11 @@ class RosterDB:
     """
 
     def __init__(self, path=DB_PATH):
-        self.conn = sqlite3.connect(path)
+        # 資料庫檔請放在本機硬碟：WAL 不支援網路磁碟（NAS、共用資料夾、雲端同步資料夾），可能壞檔
+        self.conn = sqlite3.connect(path, timeout=10)      # 遇到別人正在寫入時最多等 10 秒，不直接回 database is locked
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA synchronous = NORMAL")   # WAL 下不會壞檔，commit 不必每次等磁碟寫完，寫入快很多
 
     def close(self):
         self.conn.close()

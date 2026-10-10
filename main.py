@@ -143,4 +143,4 @@ if __name__ == "__main__":
             app.run(host=config.HOST, port=config.PORT, debug=True)
         else:
             from waitress import serve      # 正式用的 WSGI 伺服器（Flask 內建的只適合開發）
-            serve(app, host=config.HOST, port=config.PORT)
+            serve(app, host=config.HOST, port=config.PORT, threads=config.THREADS)

@@ -19,6 +19,7 @@ def _env_bool(name, default):
 DB_PATH = os.environ.get("ROSTER_DB_PATH", os.path.join(BASE_DIR, "roster.db"))   
 HOST = os.environ.get("ROSTER_HOST", "127.0.0.1")                                
 PORT = int(os.environ.get("ROSTER_PORT", "5000"))                                 
+THREADS = int(os.environ.get("ROSTER_THREADS", "12"))   # waitress 同時處理的請求數（預設 4 太少，100 人使用建議 8–16）
 DEBUG = _env_bool("ROSTER_DEBUG", False)    # 環境變數；只在本機開發時打開（會自動重新載入、顯示錯誤細節）                                          
 
 
