@@ -2,7 +2,7 @@
 
 以 Flask + SQLite 建置的內部排班系統：提交班表、請假與加班申請 / 主管審核、年度排班總覽，以及班別、員工、假日主檔維護。
 
-- 業務流程、資料表與權限的完整說明：[db_structure.md](db_structure.md)
+- 業務流程、資料表與權限的完整說明：[structure.md](structure.md)
 - 所有網址與 API 的說明：啟動後登入（需 `USER_EDIT` 權限），開啟導覽列的「API 文件」（`/apidocs`）
 
 ## 目錄
@@ -193,7 +193,7 @@ static/              CSS 與各頁 JS
 tests/               自動化測試（pytest）
 requirements.txt     執行需要的套件
 requirements-dev.txt 開發與測試需要的套件
-db_structure.md      設計說明：業務流程、資料表、權限、備份與日誌
+structure.md         設計說明：業務流程、資料表、權限、備份與日誌
 ```
 
 一個請求的處理順序：`routes/auth.py` 驗證登入 → `routes/` 的對應函式檢查權限 → `forms.py` 解析輸入 → `db.py` 依規則讀寫資料庫 → `views.py` 整理資料 → `templates/` 產生頁面（或回傳 JSON）。

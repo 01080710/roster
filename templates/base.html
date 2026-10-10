@@ -9,7 +9,7 @@
 </head>
 <body>
 <nav><div>
-  <span class="brand">Vantage Roster Situation</span>
+  <span class="brand" title="Vantage Roster Situation"><b aria-hidden="true">VR</b>Vantage Roster</span>
   {% if current_user %}
   <a href="{{ url_for('roster.index') }}" {% if request.endpoint == 'roster.index' %}class="on"{% endif %}>排班總覽</a>
   {% endif %}

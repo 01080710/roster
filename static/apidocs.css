@@ -1,5 +1,5 @@
 /* API 文件頁：Swagger UI 本身的樣式在 swagger-ui.css，這裡只補返回連結 */
 body { margin:0; background:#fafafa; }
-.apidocs-nav { max-width:1460px; margin:0 auto; padding:14px 20px 0; font:14px/1.5 -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
-.apidocs-nav a { color:#0369a1; text-decoration:none; font-weight:600; }
-.apidocs-nav a:hover { text-decoration:underline; }
+.apidocs-nav { max-width:1460px; margin:0 auto; padding:14px 20px 0; font:14px/1.5 "Helvetica Neue", Helvetica, Arial, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; }
+.apidocs-nav a { color:#111111; text-decoration:none; font-weight:700; }
+.apidocs-nav a:hover { color:#e30613; text-decoration:underline; }

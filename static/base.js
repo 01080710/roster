@@ -6,7 +6,7 @@
   const root = document.documentElement;
   const render = () => {
     const dark = root.dataset.theme === 'dark';
-    btn.textContent = dark ? '☀' : '☾';
+    btn.textContent = dark ? '☾' : '☀';
     btn.title = btn.ariaLabel = dark ? '切換成亮色' : '切換成深色';
   };
   btn.addEventListener('click', () => {
