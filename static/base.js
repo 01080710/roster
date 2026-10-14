@@ -42,3 +42,41 @@ document.querySelectorAll('dialog').forEach(dlg => {
   dlg.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => dlg.close()));
   dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
 });
+
+// 主管取消已核准的申請（請假 / 加班的審核紀錄）：先看逐日影響，填原因後才能確認取消，避免誤觸
+(() => {
+  const dlg = document.getElementById('cancel_dialog');
+  if (!dlg) return;
+  const form = dlg.querySelector('form');
+  const q = name => dlg.querySelector(`[data-f="${name}"]`);
+  const note = form.elements.note;
+  let ready = false;
+  const sync = () => { q('confirm').disabled = !(ready && note.value.trim()); };
+  note.addEventListener('input', sync);
+  document.querySelectorAll('[data-cancel-url]').forEach(btn => btn.addEventListener('click', async () => {
+    form.action = btn.dataset.cancelUrl;
+    note.value = '';
+    ready = false;
+    let d;
+    try { d = await (await fetch(btn.dataset.previewUrl)).json(); }
+    catch { d = {ok: false, error: '預覽失敗，請重新整理後再試'}; }
+    ready = d.ok;
+    q('title').textContent = `取消 ${btn.dataset.requestId}`;
+    q('error').hidden = d.ok;
+    q('error').textContent = d.ok ? '' : d.error;
+    q('summary').textContent = d.ok ? `${d.employee}：取消後會影響以下 ${d.days.length} 天` : '';
+    q('rows').replaceChildren(...(d.days || []).map(r => {
+      const tr = document.createElement('tr');
+      [r.date, r.before, r.after ?? '刪除'].forEach(v =>
+        tr.appendChild(Object.assign(document.createElement('td'), {textContent: v})));
+      return tr;
+    }));
+    sync();
+    dlg.showModal();
+    note.focus();
+  }));
+  form.addEventListener('submit', e => {
+    if (!(ready && note.value.trim())) { e.preventDefault(); return; }
+    q('confirm').disabled = true;   // 避免連點重複送出
+  });
+})();

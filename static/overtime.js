@@ -39,17 +39,20 @@
   }
   startSel.addEventListener('change', () => { fillEnds(); preview(); });
 
+  const query = () => {
+    const unit = f.mode.value === 'unit';
+    return new URLSearchParams({mode: f.mode.value, start_date: f.start_date.value, end_date: f.end_date.value,
+                                shift_code: unit ? f.shift_code.value : '',
+                                start_time: unit ? '' : f.start_time.value, end_time: unit ? '' : f.end_time.value});
+  };
   let seq = 0;
   async function preview() {
     const unit = f.mode.value === 'unit';
     const ready = f.start_date.value && (unit ? f.shift_code.value : f.start_time.value && f.end_time.value);
     if (!ready) { out.textContent = ''; return; }
-    const q = new URLSearchParams({mode: f.mode.value, start_date: f.start_date.value, end_date: f.end_date.value,
-                                   shift_code: unit ? f.shift_code.value : '',
-                                   start_time: unit ? '' : f.start_time.value, end_time: unit ? '' : f.end_time.value});
     const id = ++seq;
     try {
-      const d = await (await fetch(`${form.dataset.previewUrl}?${q}`)).json();
+      const d = await (await fetch(`${form.dataset.previewUrl}?${query()}`)).json();
       if (id !== seq) return;
       out.className = d.ok ? 'hint' : 'hint flag';
       out.textContent = d.ok ? `共 ${d.days} 天${d.hours ? `（${d.hours} 小時）` : ''}：${d.dates.join('、')}` : d.error;
@@ -61,4 +64,33 @@
   toggle();
   loadSlots();
   preview();
+
+  // 按「送出申請」先確認：伺服器用和送出相同的檢查預覽（不寫入），有問題時「確認送出」不能按
+  const dlg = document.getElementById('ot_confirm_dialog');
+  const q = name => dlg.querySelector(`[data-f="${name}"]`);
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    let d;
+    try { d = await (await fetch(`${form.dataset.previewUrl}?${query()}`)).json(); }
+    catch { d = {ok: false, error: '預覽失敗，請重新整理後再試'}; }
+    const unit = f.mode.value === 'unit';
+    q('error').hidden = d.ok;
+    q('error').textContent = d.ok ? '' : d.error;
+    q('meta').hidden = !d.ok;
+    if (d.ok) {
+      q('mode').textContent = f.mode.selectedOptions[0].textContent;
+      q('dates').textContent = d.dates.join('、');
+      q('what').textContent = unit ? f.shift_code.selectedOptions[0].textContent
+                                   : `${f.start_time.value} → ${f.end_time.value}`;
+      q('days').textContent = `${d.days} 天` + (d.hours ? `（${d.hours} 小時）` : '');
+      q('reason').textContent = f.reason.value.trim() || '（未填）';
+      q('approvers').textContent = d.approvers.join('、');
+    }
+    q('confirm').disabled = !d.ok;
+    dlg.showModal();
+  });
+  q('confirm').addEventListener('click', () => {
+    q('confirm').disabled = true;   // 避免連點重複送出
+    form.submit();                  // 不會再觸發 submit 事件，伺服器端仍會再檢查一次
+  });
 })();

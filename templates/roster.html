@@ -72,7 +72,7 @@
   {% from "_messages.html" import flashes %}{{ flashes('info') }}
 
   {% if can('USER_CREATE') %}
-  <form class="card" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <form class="card" method="post" id="submit_form" data-preview-url="{{ url_for('roster.api_roster_preview') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h2>提交班表</h2>
     <div class="grid">
       <div>
@@ -112,11 +112,31 @@
       日期區間內遇到休息日或國定假日時略過（上班與請假班別適用）</label>
     <button type="submit">送出</button>
   </form>
+
+  {# 送出前先預覽：逐日列出新增 / 覆蓋 / 略過 / 失敗，確認後才寫入；有任一天失敗就不能寫入 #}
+  <dialog id="preview_dialog" class="wide">
+    <div class="body">
+      <div class="head">
+        <h2 data-f="title">確認提交</h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <div class="banner" data-f="error" hidden></div>
+      <div class="scroll"><table>
+        <thead><tr><th>日期</th><th>星期</th><th>結果</th><th>班別</th><th>說明</th></tr></thead>
+        <tbody data-f="rows"></tbody>
+      </table></div>
+      <div class="actions">
+        <button type="button" class="secondary" data-close>取消</button>
+        <button type="button" data-f="confirm">確認寫入</button>
+      </div>
+    </div>
+  </dialog>
   {% endif %}
 
   {% if results %}
   <div class="card">
-    <h2>提交結果：新增 {{ summary.created }} 筆、更新 {{ summary.updated }} 筆、略過 {{ summary.skipped }} 筆、失敗 {{ summary.error }} 筆</h2>
+    <h2>{% if summary.error %}未寫入（全有或全無）：可新增 {{ summary.created }} 筆、可覆蓋 {{ summary.updated }} 筆、略過 {{ summary.skipped }} 筆、失敗 {{ summary.error }} 筆
+      {%- else %}提交結果：新增 {{ summary.created }} 筆、更新 {{ summary.updated }} 筆、略過 {{ summary.skipped }} 筆、失敗 {{ summary.error }} 筆{% endif %}</h2>
     <div class="scroll"><table>
       <tr><th>日期</th><th>星期</th><th>結果</th><th>日別</th><th>班別</th><th>上班時間</th><th>工時</th><th>提醒</th></tr>
       {% for r in results %}

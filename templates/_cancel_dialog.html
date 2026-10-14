@@ -1,0 +1,30 @@
+{# 主管取消已核准的申請：先看逐日影響、填原因（必填）後才能送出，避免誤觸。按鈕見 cancel_button，行為在 base.js #}
+{% macro cancel_button(q, cancel_endpoint, preview_endpoint) %}
+  <button type="button" class="danger" data-request-id="{{ q.request_id }}"
+          data-cancel-url="{{ url_for(cancel_endpoint, request_id=q.request_id) }}"
+          data-preview-url="{{ url_for(preview_endpoint, request_id=q.request_id) }}">取消</button>
+{% endmacro %}
+
+{% macro cancel_dialog(effect) %}
+  <dialog id="cancel_dialog" class="wide">
+    <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="head">
+        <h2 data-f="title">取消已核准的申請</h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <div class="banner" data-f="error" hidden></div>
+      <p class="sub" data-f="summary"></p>
+      <div class="scroll"><table>
+        <thead><tr><th>日期</th><th>目前</th><th>取消後</th></tr></thead>
+        <tbody data-f="rows"></tbody>
+      </table></div>
+      <p class="sub">{{ effect }}取消後不能復原，要重新申請、重新審核。</p>
+      <label for="cancel_note">取消原因（必填，會記在審核意見）</label>
+      <input type="text" id="cancel_note" name="note" maxlength="200" required placeholder="例如：員工行程取消">
+      <div class="actions">
+        <button type="button" class="secondary" data-close>返回</button>
+        <button type="submit" class="danger" data-f="confirm" disabled>確認取消</button>
+      </div>
+    </form>
+  </dialog>
+{% endmacro %}

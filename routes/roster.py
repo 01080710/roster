@@ -104,8 +104,13 @@ def index():
                                         posted["leave_approval_status"], posted["remarks"],
                                         posted["skip_non_working"], allow_update=can("USER_EDIT"))
             action = "roster_edit" if posted["edit_key"] else "roster_submit"
-            audit("修改班表" if posted["edit_key"] else "提交班表", action, via="web",
-                  shift_code=posted["shift_code"], start_date=start, end_date=end, counts=result_counts(results))
+            counts = result_counts(results)
+            if counts["error"]:             # 全有或全無：有任一天失敗就整批沒寫入
+                log.warning("提交班表未寫入", extra={"action": action, "counts": counts})
+                error = f"有 {counts['error']} 天無法寫入，整批都沒有寫入；請看下方原因，調整後再送出"
+            else:
+                audit("修改班表" if posted["edit_key"] else "提交班表", action, via="web",
+                      shift_code=posted["shift_code"], start_date=start, end_date=end, counts=counts)
         except ValueError as e:
             log.warning("提交班表被拒", extra={"action": "roster_submit", "error": str(e)})
             row = db().get_roster(posted["edit_key"]) if posted["edit_key"] else None
@@ -215,7 +220,7 @@ def api_roster_detail():
 @require("USER_CREATE")
 def api_roster():
     """提交班表
-    逐日寫入日期區間。沒有 USER_EDIT 時只能提交自己的、不能覆蓋已有排班；請假代碼需 LEAVE_APPROVE（其他人請走請假申請）；加班請改用 POST /api/overtime。
+    逐日寫入日期區間，全有或全無：任一天失敗就整批不寫入，回 400 並附上逐日結果（可先用 GET /api/roster/preview 預覽）。沒有 USER_EDIT 時只能提交自己的、不能覆蓋已有排班；請假代碼需 LEAVE_APPROVE（其他人請走請假申請）；加班請改用 POST /api/overtime。
     回傳每一天的結果：action 為 created / updated / skipped / error，row 是寫入後的 fact_roster 資料。
     ---
     requestBody:
@@ -255,9 +260,63 @@ def api_roster():
         results = db().submit_range(p["employee_id"], p["shift_code"], p["start_date"], p["end_date"],
                                     p["leave_approval_status"], p["remarks"],
                                     p["skip_non_working"], allow_update=can("USER_EDIT"))
+        counts = result_counts(results)
+        if counts["error"]:
+            log.warning("提交班表未寫入", extra={"action": "roster_submit", "via": "api", "counts": counts})
+            return jsonify({"ok": False, "error": f"有 {counts['error']} 天無法寫入，整批都沒有寫入",
+                            "results": results}), 400
         audit("提交班表", "roster_submit", via="api", employee_id=p["employee_id"], shift_code=p["shift_code"],
-              start_date=p["start_date"], end_date=p["end_date"], counts=result_counts(results))
+              start_date=p["start_date"], end_date=p["end_date"], counts=counts)
     except (KeyError, ValueError, TypeError, AttributeError) as e:
         log.warning("提交班表被拒", extra={"action": "roster_submit", "via": "api", "error": str(e)})
         return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify({"ok": True, "results": results})
+
+
+@bp.get("/api/roster/preview")
+@require("USER_CREATE")
+def api_roster_preview():
+    """提交班表預覽
+    「提交班表」按送出時先呼叫，不會寫入資料。用和 POST /api/roster 相同的檢查，回傳逐日會發生什麼：
+    action 為 created（新增）/ updated（覆蓋，before 為原本的班別）/ skipped（略過）/ error（失敗）。
+    有任一天 error 時 can_write 為 false：送出會整批不寫入。
+    ---
+    parameters:
+      - {name: employee_id, in: query, required: true, schema: {type: string, example: EMP0003}}
+      - {name: shift_code, in: query, required: true, schema: {type: string, example: S0716_FD}}
+      - {name: start_date, in: query, required: true, schema: {type: string, format: date, example: "2026-11-02"}}
+      - {name: end_date, in: query, schema: {type: string, format: date, example: "2026-11-08"}, description: 預設同 start_date}
+      - {name: leave_approval_status, in: query, schema: {type: string, enum: [Approved, Pending, Rejected]}}
+      - {name: skip_non_working, in: query, schema: {type: boolean, default: true}, description: 略過休息日與國定假日}
+    responses:
+      200:
+        description: 逐日預覽
+        content:
+          application/json:
+            example:
+              ok: true
+              can_write: true
+              counts: {created: 1, updated: 1, skipped: 2, error: 0}
+              results:
+                - {date: "2026-11-02", weekday: Mon, action: updated, before: OFF_FD, shift_code: S0716_FD, message: ""}
+                - {date: "2026-11-07", weekday: Sat, action: skipped, before: null, shift_code: S0716_FD, message: "略過：Rest Day"}
+      400: {$ref: "#/components/responses/BadRequest"}
+    """
+    try:
+        a = request.args
+        if not (a.get("employee_id") and a.get("shift_code") and a.get("start_date")):
+            raise ValueError("請選擇員工、班別與開始日期")
+        p = forms.parse_api_payload({**a, "skip_non_working": a.get("skip_non_working", "1") not in ("0", "false")})
+        check_own_employee(p["employee_id"])
+        check_leave_shift(p["shift_code"])
+        check_agent_shift(p["employee_id"], p["shift_code"])
+        results = db().submit_range(p["employee_id"], p["shift_code"], p["start_date"], p["end_date"],
+                                    p["leave_approval_status"] or None, None, p["skip_non_working"],
+                                    allow_update=can("USER_EDIT"), dry_run=True)
+    except (KeyError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    counts = result_counts(results)
+    return jsonify({"ok": True, "can_write": not counts["error"], "counts": counts,
+                    "results": [{"date": r["date"], "weekday": config.WEEKDAY[dt.date.fromisoformat(r["date"]).weekday()],
+                                 "action": r["action"], "before": r.get("before"), "shift_code": p["shift_code"],
+                                 "message": r["message"]} for r in results]})

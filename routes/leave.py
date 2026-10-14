@@ -116,6 +116,32 @@ def leave_decide(request_id):
     return redirect_msg(".leave", msg)
 
 
+@bp.get("/api/leave/<request_id>/cancel-preview")
+@require("LEAVE_APPROVE")
+def api_leave_cancel_preview(request_id):
+    """取消已核准請假的影響預覽
+    主管按「取消」時先呼叫，不會寫入資料。列出這張單寫入班表的每一天、取消後會還原成哪個班（after 為 null 表示刪除那天）。
+    ---
+    parameters:
+      - {name: request_id, in: path, required: true, schema: {type: string, example: LR-20261013-001}}
+    responses:
+      200:
+        description: 逐日影響
+        content:
+          application/json:
+            example: {ok: true, request_id: LR-20261013-001, employee: "EMP0003 · Joanne Loy",
+                      days: [{date: "2026-11-10", before: AL_FD, after: S0716_FD}]}
+      400: {$ref: "#/components/responses/BadRequest"}
+    """
+    try:
+        days = db().preview_cancel_leave(request_id, g.user["employee_id"])
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    emp = db().get_employee(db().get_leave_request(request_id)["employee_id"])
+    return jsonify({"ok": True, "request_id": request_id, "employee": f"{emp['employee_id']} · {emp['full_name']}",
+                    "days": days})
+
+
 @bp.post("/leave/<request_id>/cancel")
 @require("USER_VIEW")
 def leave_cancel(request_id):
@@ -128,7 +154,7 @@ def leave_cancel(request_id):
           schema:
             type: object
             properties:
-              note: {type: string, description: 取消原因（主管取消已核准的假時填寫）}
+              note: {type: string, description: 取消原因；主管取消已核准的假時必填（可先呼叫 cancel-preview 看影響）}
     responses:
       302: {description: 導回請假頁，頁面上方顯示結果或失敗原因}
     """

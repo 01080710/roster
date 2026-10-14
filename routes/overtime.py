@@ -123,6 +123,32 @@ def overtime_decide(request_id):
     return redirect_msg(".overtime", msg)
 
 
+@bp.get("/api/overtime/<request_id>/cancel-preview")
+@require("OT_APPROVE")
+def api_overtime_cancel_preview(request_id):
+    """取消已核准加班的影響預覽
+    主管按「取消」時先呼叫，不會寫入資料。列出這張單寫入的每一天加班，取消後都會刪除（after 一律為 null）。
+    ---
+    parameters:
+      - {name: request_id, in: path, required: true, schema: {type: string, example: OTR-20261013-001}}
+    responses:
+      200:
+        description: 逐日影響
+        content:
+          application/json:
+            example: {ok: true, request_id: OTR-20261013-001, employee: "EMP0003 · Joanne Loy",
+                      days: [{date: "2026-11-07", before: "18:00 → 21:00（3 小時）", after: null}]}
+      400: {$ref: "#/components/responses/BadRequest"}
+    """
+    try:
+        days = db().preview_cancel_overtime(request_id, g.user["employee_id"])
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    emp = db().get_employee(db().get_overtime_request(request_id)["employee_id"])
+    return jsonify({"ok": True, "request_id": request_id, "employee": f"{emp['employee_id']} · {emp['full_name']}",
+                    "days": days})
+
+
 @bp.post("/overtime/<request_id>/cancel")
 @require("USER_VIEW")
 def overtime_cancel(request_id):
@@ -135,7 +161,7 @@ def overtime_cancel(request_id):
           schema:
             type: object
             properties:
-              note: {type: string, description: 取消原因}
+              note: {type: string, description: 取消原因；主管取消已核准的加班時必填（可先呼叫 cancel-preview 看影響）}
     responses:
       302: {description: 導回加班頁，頁面上方顯示結果或失敗原因}
     """
@@ -208,7 +234,7 @@ def api_overtime_slots():
 @require("OT_APPLY")
 def api_overtime_preview():
     """加班天數 / 時數預覽
-    加班表單變更時呼叫，不會寫入資料。參數同送出加班申請。
+    加班表單變更與按「送出申請」時呼叫，不會寫入資料。參數與檢查都同送出加班申請（含有沒有主管能審）；approvers 為會審核的人。
     ---
     parameters:
       - {name: mode, in: query, schema: {type: string, enum: [time, unit]}, description: 不帶時依有沒有 shift_code 判斷}
@@ -222,23 +248,21 @@ def api_overtime_preview():
         description: 預覽結果；hours 只有 mode=time 才有
         content:
           application/json:
-            example: {ok: true, days: "0.375", hours: "3", dates: ["2026-10-30"]}
+            example: {ok: true, days: "0.375", hours: "3", dates: ["2026-10-30"], approvers: [Peter Chang]}
       400: {$ref: "#/components/responses/BadRequest"}
     """
     try:
         p = forms.parse_overtime_form(request.args)
         if not p["start_date"]:
             raise ValueError("請選擇加班日期")
-        rows, days, hours = db().plan_overtime(g.user["employee_id"], p["start_date"], p["end_date"],
-                                               p["shift_code"], p["start_time"], p["end_time"])
-        hit = db().overtime_overlap(g.user["employee_id"], p["start_date"], p["end_date"])
-        if hit:
-            raise ValueError(f"日期與加班申請單 {hit} 重疊")
+        rows, days, hours = db().check_overtime_request(g.user["employee_id"], p["start_date"], p["end_date"],
+                                                        p["shift_code"], p["start_time"], p["end_time"])
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     return jsonify({"ok": True, "days": views.days_text(days),
                     "hours": views.days_text(hours) if hours else None,
-                    "dates": [r["overtime_date"] for r in rows]})
+                    "dates": [r["overtime_date"] for r in rows],
+                    "approvers": [a["full_name"] for a in db().overtime_approvers(g.user["employee_id"])]})
 
 
 @bp.post("/api/overtime")

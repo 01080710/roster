@@ -358,6 +358,12 @@ def _sql_default(dflt):
             return dflt
 
 
+def _require_cancel_note(req, note, dry_run, what):
+    """取消已核准的申請會改動已生效的資料（班表 / 加班紀錄），一定要留下原因，避免誤觸。"""
+    if req["status"] == "Approved" and not dry_run and not (note or "").strip():
+        raise ValueError(f"取消已核准的{what}需要填寫原因")
+
+
 ### 4. RosterDB：包住一條連線，提供排班與維度表的讀寫
 class RosterDB:
     """用法：
@@ -697,8 +703,10 @@ class RosterDB:
         return "updated" if exists else "created"
 
     def submit_range(self, employee_id, shift_code, start_date, end_date,
-                     leave_approval_status=None, remarks=None, skip_non_working=True, allow_update=True):
-        """把同一個班別套用到日期區間內的每一天，回傳每天的結果。
+                     leave_approval_status=None, remarks=None, skip_non_working=True, allow_update=True,
+                     dry_run=False):
+        """把同一個班別套用到日期區間內的每一天，回傳每天的結果（before 為覆蓋前的班別）。
+        全有或全無：任一天失敗就整批不寫入；dry_run=True 只預覽，跑完同一套檢查後一律不寫入。
         allow_update=False（沒有 USER_EDIT）時，已有排班的日子不覆蓋。"""
         if end_date < start_date:
             raise ValueError("結束日期不可早於開始日期")
@@ -725,12 +733,16 @@ class RosterDB:
                     raise ValueError("這天已登記加班，不能排全天請假；請先刪除加班")
                 if row["status_group"] == "Leave":
                     self._apply_leave(row, self.get_shift(shift_code))
+                # 先寫進同一個交易（後面幾天的檢查才看得到前一天，例如休息時數），最後再決定 commit 或 rollback
                 action = self.upsert_roster(row)
-                self.conn.commit()
-                results.append({"date": _iso(d), "action": action, "message": row["check_flag"] or "", "row": row})
+                results.append({"date": _iso(d), "action": action, "message": row["check_flag"] or "", "row": row,
+                                "before": existing["shift_code"] if existing is not None else None})
             except ValueError as e:
-                self.conn.rollback()
                 results.append({"date": _iso(d), "action": "error", "message": str(e), "row": None})
+        if dry_run or any(r["action"] == "error" for r in results):
+            self.conn.rollback()
+        else:
+            self.conn.commit()
         return results
 
     # ---------------- 加班（fact_overtime，與班表分開存，一人一天最多一筆） ----------------
@@ -846,11 +858,8 @@ class RosterDB:
     def create_overtime_request(self, employee_id, start_date, end_date, shift_code=None, start_time=None,
                                 end_time=None, reason=None):
         """送出加班申請（Pending），回傳 request_id。"""
-        self._check_can_submit(employee_id, "OT_APPROVE", "加班")
-        _, days, hours = self.plan_overtime(employee_id, start_date, end_date, shift_code, start_time, end_time)
-        hit = self.overtime_overlap(employee_id, start_date, end_date)
-        if hit:
-            raise ValueError(f"日期與加班申請單 {hit} 重疊")
+        _, days, hours = self.check_overtime_request(employee_id, start_date, end_date, shift_code, start_time,
+                                                     end_time)
         return self._insert_request("fact_overtime_request", "OTR", lambda rid, now: self.conn.execute(
             """INSERT INTO fact_overtime_request
                (request_id, employee_id, shift_code, start_time, end_time, start_date, end_date, days, hours,
@@ -858,6 +867,16 @@ class RosterDB:
                VALUES (?,?,?,?,?,?,?,?,?,?,'Pending',?,?)""",
             (rid, employee_id, shift_code or None, start_time or None, end_time or None, _iso(start_date),
              _iso(end_date), days, hours, reason or None, now, now)))
+
+    def check_overtime_request(self, employee_id, start_date, end_date, shift_code=None, start_time=None,
+                               end_time=None):
+        """送出加班申請前的完整檢查（預覽與送出共用），回傳 plan_overtime 的 (rows, days, hours)。"""
+        self._check_can_submit(employee_id, "OT_APPROVE", "加班")
+        plan = self.plan_overtime(employee_id, start_date, end_date, shift_code, start_time, end_time)
+        hit = self.overtime_overlap(employee_id, start_date, end_date)
+        if hit:
+            raise ValueError(f"日期與加班申請單 {hit} 重疊")
+        return plan
 
     def get_overtime_request(self, request_id):
         return self.conn.execute("SELECT * FROM fact_overtime_request WHERE request_id = ?", (request_id,)).fetchone()
@@ -902,8 +921,15 @@ class RosterDB:
         self.conn.commit()
 
     def cancel_overtime_request(self, request_id, actor_id, as_approver=False, note=None):
-        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消，
+        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消（需填原因），
         並刪除這張申請寫入的加班。回傳刪除的天數。"""
+        return len(self._cancel_overtime(request_id, actor_id, as_approver, note))
+
+    def preview_cancel_overtime(self, request_id, actor_id):
+        """主管取消前的影響預覽（不寫入）：[{date, before, after}]，after 為 None 表示刪除。"""
+        return self._cancel_overtime(request_id, actor_id, True, dry_run=True)
+
+    def _cancel_overtime(self, request_id, actor_id, as_approver, note=None, dry_run=False):
         table = "fact_overtime_request"
         req = self._request_in(request_id, "Pending", "Approved", table=table)
         own_pending = req["status"] == "Pending" and req["employee_id"] == actor_id
@@ -911,9 +937,15 @@ class RosterDB:
             if not as_approver:
                 raise ValueError("已核准的加班需由主管取消" if req["status"] == "Approved" else "只能撤回自己的申請")
             self._check_approver(req, actor_id, "加班")
+        _require_cancel_note(req, note, dry_run, "加班")
+        impact = [{"date": o["overtime_date"], "after": None,
+                   "before": o["shift_code"] or f"{o['start_local'][11:]} → {o['end_local'][11:]}（{o['ot_hours']:g} 小時）"}
+                  for o in self.conn.execute("""SELECT * FROM fact_overtime WHERE overtime_request_id = ?
+                                                ORDER BY overtime_date""", (request_id,))]
+        if dry_run:
+            return impact
         try:
-            removed = self.conn.execute("DELETE FROM fact_overtime WHERE overtime_request_id = ?",
-                                        (request_id,)).rowcount
+            self.conn.execute("DELETE FROM fact_overtime WHERE overtime_request_id = ?", (request_id,))
             who = "申請人撤回" if own_pending else f"{actor_id} 取消"
             self._set_request_status(request_id, req["status"], "status = 'Cancelled', decision_note = ?, updated_at = ?",
                                      (f"{who}：{note}" if note else who, _now()), table=table)
@@ -921,7 +953,7 @@ class RosterDB:
         except (ValueError, sqlite3.Error):
             self.conn.rollback()
             raise
-        return removed
+        return impact
 
     _OVERTIME_SELECT = """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display,
                                  a.full_name AS approver_name
@@ -1501,20 +1533,28 @@ class RosterDB:
         self.conn.commit()
 
     def cancel_leave_request(self, request_id, actor_id, as_approver=False, note=None):
-        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消，
+        """待審核：申請人可撤回，審核人也可取消；已核准：只有審核人能取消（需填原因），
         並把該申請寫入的班表還原為原本的班（舊資料沒有記錄時用預設班別；都沒有時刪除該天）。回傳還原天數。"""
+        return len(self._cancel_leave(request_id, actor_id, as_approver, note))
+
+    def preview_cancel_leave(self, request_id, actor_id):
+        """主管取消前的影響預覽（不寫入）：[{date, before, after}]，after 為 None 表示刪除那天。"""
+        return self._cancel_leave(request_id, actor_id, True, dry_run=True)
+
+    def _cancel_leave(self, request_id, actor_id, as_approver, note=None, dry_run=False):
         req = self._request_in(request_id, "Pending", "Approved")
         own_pending = req["status"] == "Pending" and req["employee_id"] == actor_id
         if not own_pending:
             if not as_approver:
                 raise ValueError("已核准的請假需由主管取消" if req["status"] == "Approved" else "只能撤回自己的申請")
             self._check_approver(req, actor_id)
+        _require_cancel_note(req, note, dry_run, "請假")
         default = self.get_employee(req["employee_id"])["default_shift_code"]
-        restored = 0
+        impact = []
         try:
             for r in self.conn.execute(
-                    "SELECT roster_key, roster_date, base_shift_code FROM fact_roster WHERE leave_request_id = ?",
-                    (request_id,)).fetchall():
+                    """SELECT roster_key, roster_date, shift_code, base_shift_code FROM fact_roster
+                       WHERE leave_request_id = ? ORDER BY roster_date""", (request_id,)).fetchall():
                 try:
                     # 有記錄原本的班就還原原本的班；舊資料沒有時還原為預設班別
                     restore = r["base_shift_code"] or default
@@ -1525,8 +1565,12 @@ class RosterDB:
                                                    remarks=f"{request_id} 已取消，還原{what}")
                     self.upsert_roster(row)
                 except ValueError:
+                    restore = None
                     self.conn.execute("DELETE FROM fact_roster WHERE roster_key = ?", (r["roster_key"],))
-                restored += 1
+                impact.append({"date": r["roster_date"], "before": r["shift_code"], "after": restore})
+            if dry_run:            # 預覽：跑完同一套還原邏輯後回滾，結果和真的取消一致
+                self.conn.rollback()
+                return impact
             who = "申請人撤回" if own_pending else f"{actor_id} 取消"
             self._set_request_status(request_id, req["status"], "status = 'Cancelled', decision_note = ?, updated_at = ?",
                                      (f"{who}：{note}" if note else who, _now()))
@@ -1534,7 +1578,7 @@ class RosterDB:
         except (ValueError, sqlite3.Error):
             self.conn.rollback()
             raise
-        return restored
+        return impact
 
     _LEAVE_SELECT = """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display,
                               a.full_name AS approver_name

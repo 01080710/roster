@@ -154,6 +154,7 @@ dialog .actions { display:flex; justify-content:flex-end; gap:10px; }
 dialog .scroll { max-height:60vh; overflow:auto; }
 dl.meta { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:0 0 18px;
           padding:12px 0; border-top:1px solid var(--rule); border-bottom:1px solid var(--line); font-size:13px; }
+dl.meta[hidden] { display:none; }
 dl.meta dt { color:var(--muted); }
 dl.meta dd { margin:0; font-weight:600; }
 /* 請假月曆：人數越多顏色越深 */

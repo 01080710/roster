@@ -4,6 +4,7 @@
 {% macro period(q) %}{{ q.start_date }}{% if q.end_date != q.start_date %} → {{ q.end_date }}{% endif %}{% endmacro %}
 {% macro how(q) %}{% if q.shift_code %}{{ q.shift_code }} · {{ q.roster_display }}{% else %}{{ q.start_time }} → {{ q.end_time }}{% endif %}{% endmacro %}
 {% macro amount(q) %}{{ q.days|days }} 天{% if q.hours %}<div class="hint">{{ q.hours|days }} 小時</div>{% endif %}{% endmacro %}
+{% from "_cancel_dialog.html" import cancel_button, cancel_dialog %}
 {% block content %}
   <h1>加班</h1>
   <p class="sub">送出申請後由主管審核，核准後才寫入加班紀錄；加班和班表分開存，不會覆蓋當天的班。待審核的加班會在排班總覽以虛線框顯示，不計入加班天數。</p>
@@ -88,6 +89,30 @@
     <button type="submit">送出申請</button>
   </form>
 
+  {# 送出前先確認：伺服器用和送出相同的檢查預覽，有問題時不能送出 #}
+  <dialog id="ot_confirm_dialog">
+    <div class="body">
+      <div class="head">
+        <h2 data-f="title">確認送出加班申請</h2>
+        <button type="button" class="close" data-close aria-label="關閉">×</button>
+      </div>
+      <div class="banner" data-f="error" hidden></div>
+      <dl class="meta" data-f="meta">
+        <dt>方式</dt><dd data-f="mode"></dd>
+        <dt>日期</dt><dd data-f="dates"></dd>
+        <dt>時段 / 班別</dt><dd data-f="what"></dd>
+        <dt>天數</dt><dd data-f="days"></dd>
+        <dt>原因</dt><dd data-f="reason"></dd>
+        <dt>審核人</dt><dd data-f="approvers"></dd>
+      </dl>
+      <p class="sub">送出後不能修改，要撤回後重新申請。</p>
+      <div class="actions">
+        <button type="button" class="secondary" data-close>取消</button>
+        <button type="button" data-f="confirm">確認送出</button>
+      </div>
+    </div>
+  </dialog>
+
   <div class="card">
     <h2>我的申請紀錄</h2>
     {% if mine %}
@@ -137,11 +162,7 @@
         <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Approved' %}
-          <form class="inline" method="post" action="{{ url_for('overtime.overtime_cancel', request_id=q.request_id) }}"
-                data-confirm="取消後會刪除這張單寫入的加班，確定取消 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="text" name="note" placeholder="取消原因（選填）">
-            <button type="submit" class="danger">取消</button>
-          </form>{% endif %}</td>
+          {{ cancel_button(q, 'overtime.overtime_cancel', 'overtime.api_overtime_cancel_preview') }}{% endif %}</td>
       </tr>
       {% endfor %}
     </table></div>
@@ -149,6 +170,7 @@
     <p class="sub">還沒有審核紀錄。</p>
     {% endif %}
   </div>
+  {{ cancel_dialog('取消後，這張單寫入的加班紀錄會刪除。') }}
   {% endif %}
 {% endblock %}
 {% block script %}

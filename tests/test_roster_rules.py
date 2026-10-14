@@ -116,4 +116,42 @@ def test_agent_cannot_submit_other_shift(client):
     r = client.post("/api/roster", json=dict(body, shift_code="S0918_FD"), headers=h)
     assert r.status_code == 400 and "S0716_FD" in r.get_json()["error"]
     assert client.post("/api/roster", json=dict(body, shift_code="S0716_FD"), headers=h).status_code == 200
-    assert client.post("/api/roster", json=dict(body, shift_code="OFF_FD"), headers=h).status_code == 200
+    assert client.post("/api/roster", json=dict(body, shift_code="OFF_FD", start_date="2026-11-03"),
+                       headers=h).status_code == 200
+
+
+# ---------------- 提交班表：先預覽，全有或全無 ----------------
+def test_dry_run_previews_without_writing(rdb):
+    rdb.submit_range("EMP0003", "OFF_FD", D(2026, 11, 2), D(2026, 11, 2), skip_non_working=False)
+    results = rdb.submit_range("EMP0003", "S0716_FD", D(2026, 11, 2), D(2026, 11, 3), dry_run=True)
+    assert [(r["action"], r["before"]) for r in results] == [("updated", "OFF_FD"), ("created", None)]
+    assert rdb.get_roster("EMP0003-20261102")["shift_code"] == "OFF_FD"
+    assert rdb.get_roster("EMP0003-20261103") is None
+
+
+def test_submit_range_writes_nothing_when_any_day_fails(rdb):
+    rid = rdb.create_leave_request("EMP0003", "AL_FD", D(2026, 11, 4), D(2026, 11, 4))
+    rdb.approve_leave_request(rid, "EMP0001")
+    results = rdb.submit_range("EMP0003", "S0716_FD", D(2026, 11, 2), D(2026, 11, 5))
+    assert [r["action"] for r in results] == ["created", "created", "error", "created"]
+    assert [rdb.get_roster(f"EMP0003-2026110{d}") for d in (2, 3, 5)] == [None, None, None]
+    assert rdb.get_roster("EMP0003-20261104")["leave_request_id"] == rid
+
+
+def test_preview_api_and_post_all_or_nothing(client, rdb):
+    from conftest import bearer
+    h = bearer(client, "EMP0003")
+    q = "employee_id=EMP0003&shift_code=S0716_FD&start_date=2026-11-06&end_date=2026-11-09"
+    d = client.get(f"/api/roster/preview?{q}", headers=h).get_json()
+    assert d["can_write"] and d["counts"] == {"created": 2, "updated": 0, "skipped": 2, "error": 0}
+    assert d["results"][0] == {"date": "2026-11-06", "weekday": "Fri", "action": "created", "before": None,
+                               "shift_code": "S0716_FD", "message": ""}
+    assert rdb.get_roster("EMP0003-20261106") is None                       # 預覽不寫入
+    assert client.get("/api/roster/preview?" + q.replace("S0716_FD", "S0918_FD"), headers=h).status_code == 400
+    rid = rdb.create_leave_request("EMP0003", "AL_FD", D(2026, 11, 9), D(2026, 11, 9))
+    rdb.approve_leave_request(rid, "EMP0001")
+    assert client.get(f"/api/roster/preview?{q}", headers=h).get_json()["can_write"] is False
+    body = {"employee_id": "EMP0003", "shift_code": "S0716_FD", "start_date": "2026-11-06", "end_date": "2026-11-09"}
+    r = client.post("/api/roster", json=body, headers=h)
+    assert r.status_code == 400 and len(r.get_json()["results"]) == 4
+    assert rdb.get_roster("EMP0003-20261106") is None

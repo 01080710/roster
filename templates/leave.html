@@ -2,6 +2,7 @@
 {% block title %}請假 · Vantage Roster Situation{% endblock %}
 {% macro status_tag(st) %}<span class="tag st-{{ st }}">{{ leave_status_labels[st] }}</span>{% endmacro %}
 {% macro period(q) %}{{ q.start_date }}{% if q.end_date != q.start_date %} → {{ q.end_date }}{% endif %}{% endmacro %}
+{% from "_cancel_dialog.html" import cancel_button, cancel_dialog %}
 {% block content %}
   <h1>請假</h1>
   <p class="sub">送出申請後由主管審核，核准後才寫入班表；待審核的假會在排班總覽以虛線框顯示，不計入請假天數。</p>
@@ -163,11 +164,7 @@
         <td>{{ q.approver_name or '' }}<div class="hint">{{ q.decided_at|utc_text }}</div></td>
         <td class="msg">{{ q.decision_note or '' }}</td>
         <td>{% if q.status == 'Approved' %}
-          <form class="inline" method="post" action="{{ url_for('leave.leave_cancel', request_id=q.request_id) }}"
-                data-confirm="取消後會把班表還原為預設班別，確定取消 {{ q.request_id }}？"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="text" name="note" placeholder="取消原因（選填）">
-            <button type="submit" class="danger">取消</button>
-          </form>{% endif %}</td>
+          {{ cancel_button(q, 'leave.leave_cancel', 'leave.api_leave_cancel_preview') }}{% endif %}</td>
       </tr>
       {% endfor %}
     </table></div>
@@ -175,6 +172,7 @@
     <p class="sub">還沒有審核紀錄。</p>
     {% endif %}
   </div>
+  {{ cancel_dialog('取消後，班表會還原成請假前原本的班。') }}
   {% endif %}
 {% endblock %}
 {% block script %}

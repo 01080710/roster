@@ -48,6 +48,45 @@ function bindApproval(shift, box) {
   };
   emp.addEventListener('change', applyDefaultShift);
   applyDefaultShift();   // 員工已預選（例如 Agent 只能選自己）時，直接帶入預設班別
+
+  // 送出前先預覽（GET /api/roster/preview，不寫入）：確認後才真的送出；有任一天失敗就不能寫入
+  const form = document.getElementById('submit_form');
+  const dlg = document.getElementById('preview_dialog');
+  const q = name => dlg.querySelector(`[data-f="${name}"]`);
+  const LABEL = {created: '新增', updated: '覆蓋', skipped: '略過', error: '失敗'};
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = form.elements;
+    const params = new URLSearchParams({employee_id: f.employee_id.value, shift_code: f.shift_code.value,
+                                        start_date: f.start_date.value, end_date: f.end_date.value,
+                                        leave_approval_status: f.leave_approval_status.value,
+                                        skip_non_working: f.skip_non_working.checked ? '1' : '0'});
+    let d;
+    try { d = await (await fetch(`${form.dataset.previewUrl}?${params}`)).json(); }
+    catch { d = {ok: false, error: '預覽失敗，請重新整理後再試'}; }
+    const c = d.counts || {};
+    q('title').textContent = d.ok ? `確認提交：新增 ${c.created}、覆蓋 ${c.updated}、略過 ${c.skipped}、失敗 ${c.error}` : '無法提交';
+    const err = !d.ok ? d.error : (d.can_write ? '' : `有 ${c.error} 天無法寫入，整批都不會寫入；請調整日期或班別`);
+    q('error').hidden = !err;
+    q('error').textContent = err;
+    q('rows').replaceChildren(...(d.results || []).map(r => {
+      const tr = document.createElement('tr');
+      const tag = Object.assign(document.createElement('span'), {className: `tag ${r.action}`, textContent: LABEL[r.action]});
+      const shiftText = {created: r.shift_code, updated: `${r.before} → ${r.shift_code}`}[r.action] || '—';
+      [r.date, r.weekday, tag, shiftText, r.message].forEach(v => {
+        const td = document.createElement('td');
+        if (v instanceof Node) td.appendChild(v); else td.textContent = v ?? '';
+        tr.appendChild(td);
+      });
+      return tr;
+    }));
+    q('confirm').disabled = !(d.ok && d.can_write);
+    dlg.showModal();
+  });
+  q('confirm').addEventListener('click', () => {
+    q('confirm').disabled = true;   // 避免連點重複送出
+    form.submit();                  // 不會再觸發 submit 事件，伺服器端仍會用同一套規則再檢查一次
+  });
 })();
 
 // 修改彈窗（有 USER_EDIT 才有）
