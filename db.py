@@ -139,11 +139,7 @@ CREATE TABLE IF NOT EXISTS fact_roster (
     roster_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     roster_key            TEXT NOT NULL UNIQUE, -- {{employee_id}}-{{YYYYMMDD}}
     roster_date           TEXT NOT NULL,
-    employee_id           TEXT NOT NULL REFERENCES dim_employee(employee_id),
-    full_name             TEXT,
-    office_code           TEXT,
-    team                  TEXT,
-    brand                 TEXT,
+    employee_id           TEXT NOT NULL REFERENCES dim_employee(employee_id),   -- 姓名、辦公室、team 一律 join dim_employee
     shift_code            TEXT NOT NULL REFERENCES dim_shift_code(shift_code),
     is_ot                 INTEGER DEFAULT 0,
     status_group          TEXT,
@@ -462,6 +458,7 @@ class RosterDB:
             (",".join(AGENT_PERMISSIONS), ",".join(PERMISSIONS)),
         )
         conn.commit()
+        self.drop_roster_employee_columns()
         return self.migrate_overtime()
 
     # ---------------- 帳號 ----------------
@@ -561,7 +558,7 @@ class RosterDB:
         """加班不能碰到的時段：前一天（可能跨夜到今天）、當天、隔天的上班時段。"""
         days = [_iso(day + dt.timedelta(days=i)) for i in (-1, 0, 1)]
         rows = self.conn.execute(
-            f"SELECT * FROM fact_roster WHERE employee_id = ? AND roster_date IN ({', '.join('?' * 3)})",
+            self._ROSTER_SELECT + f" WHERE r.employee_id = ? AND r.roster_date IN ({', '.join('?' * 3)})",
             [employee_id] + days).fetchall()
         return [span for span in (self._work_span(r) for r in rows) if span]
 
@@ -657,10 +654,6 @@ class RosterDB:
             "roster_key": f"{employee_id}-{ds.replace('-', '')}",
             "roster_date": ds,
             "employee_id": employee_id,
-            "full_name": emp["full_name"],
-            "office_code": emp["office_code"],
-            "team": emp["team"],
-            "brand": emp["brand"],
             "shift_code": shift_code,
             "is_ot": 0,                    # 舊欄位，保留不用；加班在 fact_overtime
             "status_group": status,
@@ -1002,6 +995,30 @@ class RosterDB:
         if cur.rowcount == 0:
             raise ValueError(f"找不到加班 {overtime_key}")
 
+    def _snapshot(self, purpose):
+        """會刪改既有資料的升級前，另存 backups/before_<purpose>_YYYYMMDD_HHMMSS.db
+        （檔名不符合每日備份的格式，不會被自動清理）。"""
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        snapshot = sqlite3.connect(os.path.join(BACKUP_DIR, f"before_{purpose}_{dt.datetime.now():%Y%m%d_%H%M%S}.db"))
+        try:
+            self.conn.backup(snapshot)
+        finally:
+            snapshot.close()
+
+    ROSTER_EMPLOYEE_COLUMNS = ("full_name", "office_code", "team", "brand")
+    def drop_roster_employee_columns(self):
+        """舊資料：刪掉 fact_roster 複製自 dim_employee 的欄位，改成查詢時 join（改員工資料後立即反映）。
+        回傳刪掉的欄位。"""
+        cols = {c["name"] for c in self.conn.execute("PRAGMA table_info(fact_roster)")}
+        drop = [c for c in self.ROSTER_EMPLOYEE_COLUMNS if c in cols]
+        if not drop:
+            return []
+        self._snapshot("roster_drop_employee_columns")
+        for col in drop:
+            self.conn.execute(f"ALTER TABLE fact_roster DROP COLUMN {col}")
+        self.conn.commit()
+        return drop
+
     def migrate_overtime(self):
         """舊資料：班表上的加班（is_ot = 1 或 OT 班別）搬到 fact_overtime，並刪除班表那天
         （原本的班別已被加班覆蓋、無法還原，需由本人重新提交）。回傳 [(employee_id, 日期), ...]。"""
@@ -1010,13 +1027,7 @@ class RosterDB:
                WHERE r.is_ot = 1 OR s.category = 'OT' ORDER BY r.roster_date""").fetchall()
         if not legacy:
             return []
-        # 搬移會刪除班表資料：先另存一份快照（檔名不符合每日備份的格式，不會被自動清理）
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        snapshot = sqlite3.connect(os.path.join(BACKUP_DIR, f"before_overtime_migration_{dt.datetime.now():%Y%m%d_%H%M%S}.db"))
-        try:
-            self.conn.backup(snapshot)
-        finally:
-            snapshot.close()
+        self._snapshot("overtime_migration")     # 搬移會刪除班表資料：先另存一份快照
         moved = []
         for r in legacy:
             unit = r["category"] == "OT"
@@ -1054,33 +1065,37 @@ class RosterDB:
             groups.setdefault(s["category"], []).append(s)
         return employees, [(CATEGORY_LABEL[k], v) for k, v in groups.items()]
 
+    # 班表一律帶出員工目前的姓名、辦公室、team（fact_roster 不存這些欄位）
+    _ROSTER_SELECT = """SELECT r.*, e.full_name, e.office_code, e.team FROM fact_roster r
+                          LEFT JOIN dim_employee e ON e.employee_id = r.employee_id"""
+
     def recent_roster(self, employee_id=None, date_from=None, date_to=None, limit=RECENT_ROSTER_LIMIT):
         where, args = [], []
         if employee_id:
-            where.append("employee_id = ?")
+            where.append("r.employee_id = ?")
             args.append(employee_id)
         if date_from:
-            where.append("roster_date >= ?")
+            where.append("r.roster_date >= ?")
             args.append(date_from)
         if date_to:
-            where.append("roster_date <= ?")
+            where.append("r.roster_date <= ?")
             args.append(date_to)
-        sql = "SELECT * FROM fact_roster" + (" WHERE " + " AND ".join(where) if where else "")
-        return self.conn.execute(sql + " ORDER BY roster_date DESC, employee_id LIMIT ?",
+        sql = self._ROSTER_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+        return self.conn.execute(sql + " ORDER BY r.roster_date DESC, r.employee_id LIMIT ?",
                                  args + [limit]).fetchall()
 
     def get_roster(self, roster_key):
-        return self.conn.execute("SELECT * FROM fact_roster WHERE roster_key = ?", (roster_key,)).fetchone()
+        return self.conn.execute(self._ROSTER_SELECT + " WHERE r.roster_key = ?", (roster_key,)).fetchone()
 
     def roster_pivot(self, year, month=None):
         """當年度（或指定月份）班表樞紐：列 = (team, office_code, full_name)，欄 = roster_date，
         值 = 班別的 roster_display 與 situation（SHIFT / LEAVE / OT / OFF / ACTIVITY）。
         有加班的日子在班別後加「+OT」；只有加班沒有班的日子顯示 OT。
-        full_name 依 employee_id 從 dim_employee 帶出。回傳 (pivot, totals)，totals 為每人上班 / 請假 / 加班天數與加班時數。"""
+        team、office_code、full_name 依 employee_id 從 dim_employee 帶出。回傳 (pivot, totals)，totals 為每人上班 / 請假 / 加班天數與加班時數。"""
         start, end = period_range(year, month)
         params = (start.isoformat(), end.isoformat())
         roster = pd.read_sql_query(
-            """SELECT r.team, r.office_code, COALESCE(e.full_name, r.employee_id) AS full_name,
+            """SELECT e.team, e.office_code, COALESCE(e.full_name, r.employee_id) AS full_name,
                       r.roster_date, r.employee_id,
                       COALESCE(s.roster_display, r.shift_code) AS roster_display,
                       COALESCE(s.category, 'SHIFT') AS situation,
@@ -1131,7 +1146,7 @@ class RosterDB:
     @staticmethod
     def _overlay_overtime(roster, marks, suffix, only_display, situation=None):
         """把加班疊到總覽：有班的日子在班別後加 suffix（指定 situation 時也改顏色），
-        只有加班的日子另加一列（沿用該員工在班表上的 team / office_code，避免拆成兩列）。天數不在這裡計入。"""
+        只有加班的日子另加一列（沿用該員工在總覽上的 team / office_code，避免拆成兩列）。天數不在這裡計入。"""
         if marks.empty:
             return roster
         mark_keys = set(zip(marks["employee_id"], marks["roster_date"]))
@@ -1153,7 +1168,7 @@ class RosterDB:
         """與 start ~ end 重疊的待審核請假，展開成每天一列（situation = PENDING）。"""
         rows = []
         for q in self.conn.execute(
-                """SELECT q.*, e.full_name, s.roster_display FROM fact_leave_request q
+                """SELECT q.*, e.full_name, e.team, e.office_code, s.roster_display FROM fact_leave_request q
                    JOIN dim_employee e ON e.employee_id = q.employee_id
                    JOIN dim_shift_code s ON s.shift_code = q.shift_code
                    WHERE q.status = 'Pending' AND q.start_date <= ? AND q.end_date >= ?""", (end, start)):
@@ -1162,7 +1177,7 @@ class RosterDB:
                                              dt.date.fromisoformat(q["start_date"]), dt.date.fromisoformat(q["end_date"]))
             except ValueError:
                 continue
-            rows += [{"team": r["team"], "office_code": r["office_code"], "full_name": q["full_name"],
+            rows += [{"team": q["team"], "office_code": q["office_code"], "full_name": q["full_name"],
                       "roster_date": r["roster_date"], "employee_id": q["employee_id"],
                       "roster_display": q["roster_display"], "situation": "PENDING",
                       "shift_code": q["shift_code"], "request_id": q["request_id"],
@@ -1179,7 +1194,8 @@ class RosterDB:
         if kind == "ot":
             return self._overtime_detail(start, end, employee_id)
         col = self.DETAIL_FRACTION[kind]
-        sql = f"""SELECT r.*, COALESCE(e.full_name, r.full_name) AS name, s.roster_display, r.{col} AS days
+        sql = f"""SELECT r.*, e.team, e.office_code, COALESCE(e.full_name, r.employee_id) AS name,
+                         s.roster_display, r.{col} AS days
                   FROM fact_roster r
                   LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
                   LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
@@ -1238,13 +1254,13 @@ class RosterDB:
         start, end = (d.isoformat() for d in period_range(year, month))
         days = {}
         for r in self.conn.execute(
-                """SELECT r.roster_date, r.employee_id, COALESCE(e.full_name, r.full_name) AS name, r.team,
+                """SELECT r.roster_date, r.employee_id, COALESCE(e.full_name, r.employee_id) AS name, e.team,
                           COALESCE(s.roster_display, r.shift_code) AS display
                    FROM fact_roster r
                    LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
                    LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
                    WHERE r.status_group = 'Leave' AND r.roster_date BETWEEN ? AND ?
-                   ORDER BY r.roster_date, r.team, name""", (start, end)):
+                   ORDER BY r.roster_date, e.team, name""", (start, end)):
             days.setdefault(r["roster_date"], []).append(
                 {"name": r["name"], "team": r["team"], "display": r["display"], "pending": False})
         pending = self._pending_leave_frame(start, end)
@@ -1293,7 +1309,7 @@ class RosterDB:
         if base_sh is None or not (base_sh["start_time"] and base_sh["end_time"]):
             raise ValueError(f"{row['roster_date']} 還沒有排上班班別，不能請 {leave_sh['shift_code']}"
                              "（需依當天的班計算請假時段）")
-        tz = ZoneInfo(OFFICE_TZ[row["office_code"]])
+        tz = ZoneInfo(OFFICE_TZ[self.get_employee(row["employee_id"])["office_code"]])
         leave, work, work_h = self._leave_split(dt.date.fromisoformat(row["roster_date"]), leave_sh, base_sh, tz)
         (row["planned_start_local"], row["planned_end_local"], row["planned_start_utc"],
          row["planned_end_utc"], _) = self._span_fields(*work)
@@ -1547,8 +1563,10 @@ class RosterDB:
         for q in self.leave_requests(approver_id=approver_id, statuses=["Pending"]):
             d = dict(q)
             d["team_off"] = self.conn.execute(
-                """SELECT COUNT(DISTINCT employee_id) FROM fact_roster
-                   WHERE team IS ? AND employee_id != ? AND status_group = 'Leave' AND roster_date BETWEEN ? AND ?""",
+                """SELECT COUNT(DISTINCT r.employee_id) FROM fact_roster r
+                   JOIN dim_employee e ON e.employee_id = r.employee_id
+                   WHERE e.team IS ? AND r.employee_id != ? AND r.status_group = 'Leave'
+                     AND r.roster_date BETWEEN ? AND ?""",
                 (q["team"], q["employee_id"], q["start_date"], q["end_date"])).fetchone()[0]
             d["team_pending"] = self.conn.execute(
                 """SELECT COUNT(DISTINCT q.employee_id) FROM fact_leave_request q

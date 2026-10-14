@@ -252,11 +252,7 @@ erDiagram
         INTEGER roster_id PK
         TEXT roster_key UK "employee_id-YYYYMMDD"
         TEXT roster_date
-        TEXT employee_id FK
-        TEXT full_name "複製自 dim_employee"
-        TEXT office_code "複製自 dim_employee"
-        TEXT team "複製自 dim_employee"
-        TEXT brand "複製自 dim_employee"
+        TEXT employee_id FK "姓名、辦公室、team 查詢時 join dim_employee"
         TEXT shift_code FK
         INTEGER is_ot "舊欄位，已不使用（加班在 fact_overtime）"
         TEXT status_group "複製自 dim_shift_code"
@@ -347,7 +343,7 @@ erDiagram
 
 | 參照方欄位 | 被參照方 | 類型 | 說明 |
 |---|---|---|---|
-| `fact_roster.employee_id` | `dim_employee.employee_id` | 外鍵 | 每筆排班屬於一位員工 |
+| `fact_roster.employee_id` | `dim_employee.employee_id` | 外鍵 | 每筆排班屬於一位員工。班表不存姓名、辦公室、team，查詢時一律 join `dim_employee` 帶出目前的值（`RosterDB._ROSTER_SELECT`），所以修改員工資料後，總覽、明細、請假月曆會立即反映 |
 | `fact_roster.shift_code` | `dim_shift_code.shift_code` | 外鍵 | 每筆排班對應一個班別或假別 |
 | `fact_roster.leave_request_id` | `fact_leave_request.request_id` | 外鍵（可空） | 由請假申請核准寫入的那幾天才有值；手動輸入的請假為 NULL |
 | `fact_roster.base_shift_code` | `dim_shift_code.shift_code` | 外鍵（可空） | 請假那天原本排的上班班別：半天假依它計算請假時段，取消請假時還原成它；不是請假或當天原本沒排班時為 NULL |
@@ -583,6 +579,7 @@ flowchart LR
 - 補上缺少的欄位：`permission`、`password_hash`、各維度表的 `created_at` / `updated_at`、`fact_roster.leave_request_id`、`fact_roster.base_shift_code`（舊資料為空，取消時改回預設班別）、`dim_employee.parent_name`。
 - `dim_employee.manager_id` 改名為 `parent_id`，並依 `parent_id` 回填 `parent_name`。
 - 舊班表上的加班（`is_ot = 1` 或 `OT_*` 班別）搬到 `fact_overtime`，並刪除班表那天（原本的班別已被加班覆蓋、無法還原）。搬移前會另存 `backups/before_overtime_migration_YYYYMMDD_HHMMSS.db`（不會被每日備份清掉），受影響的人與日期寫在 `_system` 日誌，需由本人重新提交原本的班。
+- `fact_roster` 舊版複製自 `dim_employee` 的 `full_name`、`office_code`、`team`、`brand` 欄位刪除，改成查詢時 join。刪除前會另存 `backups/before_roster_drop_employee_columns_YYYYMMDD_HHMMSS.db`。
 - 第一次建立 `fact_leave_request` 時，既有帳號補上請假權限：Agent 補 `LEAVE_APPLY`，其他角色補 `LEAVE_APPLY`、`LEAVE_APPROVE`。
 - 第一次建立 `fact_overtime_request` 時，既有帳號補上加班權限：Agent 補 `OT_APPLY`，其他角色補 `OT_APPLY`、`OT_APPROVE`；`fact_overtime` 補上 `overtime_request_id` 欄位，既有加班視為已核准的舊資料。
 - 時間戳記是空的資料，以第一次執行 `init_db` 的時間回填。
@@ -656,7 +653,8 @@ GROUP BY path ORDER BY avg_ms DESC LIMIT 10;
 
 ## 11. 備註
 
-- `fact_roster` 會複製員工與班別的部分欄位（姓名、辦公室、班別時間、工時等）。之後修改維度表，已寫入的排班不會自動更新，要重新提交那幾天才會套用。
+- 員工資料（姓名、辦公室、team）不存在 `fact_roster`，一律 join `dim_employee`，所以總覽永遠顯示員工**目前**的 team 與辦公室，調 team 後過去的班表也會歸到新 team。
+- `fact_roster` 仍會複製班別的部分欄位（`status_group`、班別時間、工時、天數等）。之後修改 `dim_shift_code`，已寫入的排班不會自動更新，要重新提交那幾天才會套用。
 - `base_shift_code` 上線前核准的請假沒有記錄原本的班：取消時仍還原為**目前的**預設班別，半天假也看不到請假時段。
 - 外鍵限制只在連線執行 `PRAGMA foreign_keys = ON` 時生效（`RosterDB` 已預設開啟）。所以刪除仍被參照的員工（有排班、有請假申請或仍是別人的主管）或班別會失敗。
 - **啟動方式**：`py -3.12 main.py` 以 waitress 啟動，可正式使用。開發時設定 `ROSTER_DEBUG=1` 改用 Flask 開發伺服器（改程式自動重新載入、顯示錯誤細節），但它不安全，**不可對外開放**。
