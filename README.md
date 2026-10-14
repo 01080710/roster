@@ -194,6 +194,9 @@ tests/               自動化測試（pytest）
 requirements.txt     執行需要的套件
 requirements-dev.txt 開發與測試需要的套件
 structure.md         設計說明：業務流程、資料表、權限、備份與日誌
+docs/journal/        開發日誌（每天一份，/day-end 寫入）
+docs/decisions.md    判斷點：已決定與待決定的事項（/day-start 讀、/day-end 更新）
+.claude/skills/      Claude Code 專案指令：/day-start 開工、/day-end 收工
 ```
 
 一個請求的處理順序：`routes/auth.py` 驗證登入 → `routes/` 的對應函式檢查權限 → `forms.py` 解析輸入 → `db.py` 依規則讀寫資料庫 → `views.py` 整理資料 → `templates/` 產生頁面（或回傳 JSON）。
