@@ -136,6 +136,8 @@ form.inline button { margin:0; padding:5px 12px; font-size:13px; }
 .s-OFF { background:var(--off-bg); color:var(--off-fg); }
 .s-ACTIVITY { background:var(--act-bg); color:var(--act-fg); }
 .s-PENDING { background:transparent; color:var(--pend-fg); outline:1px dashed var(--pend-fg); outline-offset:-3px; }
+.pivot td.split { padding:0; }   /* 部分請假：同一格上下兩段，各自用上班 / 請假的顏色 */
+.pivot td.split span { display:block; padding:2px 8px; font-size:12px; line-height:1.3; white-space:nowrap; }
 .s-OT_PENDING { background:transparent; color:var(--ot-fg); outline:1px dashed var(--ot-fg); outline-offset:-3px; }
 .legend { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; font-size:12px; }
 .legend span { padding:2px 10px; }

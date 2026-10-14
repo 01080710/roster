@@ -40,7 +40,7 @@
     </form>
     <div class="legend">
       {% for code, label in situation_labels %}<span class="s-{{ code }}">{{ label }}</span>{% endfor %}
-      <span class="note">「+OT」：當天有已核准的加班　虛線框：待審核，不計入小計</span>
+      <span class="note">「+OT」：當天有已核准的加班　上下兩段：同一天部分上班、部分請假（依時間先後）　虛線框：待審核，不計入小計</span>
     </div>
     {% if pivot.rows %}
     <div class="pivot"><table>
@@ -58,7 +58,8 @@
         <td class="k t1 drill" data-kind="work" data-emp="{{ r.employee_id }}">{{ r.work }}</td>
         <td class="k t2 drill" data-kind="leave" data-emp="{{ r.employee_id }}">{{ r.leave }}</td>
         <td class="k t3 drill" data-kind="ot" data-emp="{{ r.employee_id }}">{{ r.ot }}{% if r.ot_hours %}<small> · {{ r.ot_hours }}h</small>{% endif %}</td>
-        {% for v, s in r.cells %}<td class="{% if s %}s-{{ s }}{% elif pivot.columns[loop.index0].weekend %}wkend empty{% else %}empty{% endif %}">{{ v or '·' }}</td>{% endfor %}
+        {% for v, s, parts in r.cells %}{% if parts|length > 1 %}<td class="split" title="{{ v }}">{% for t, ps in parts %}<span class="s-{{ ps }}">{{ t }}</span>{% endfor %}</td>
+        {%- else %}<td class="{% if s %}s-{{ s }}{% elif pivot.columns[loop.index0].weekend %}wkend empty{% else %}empty{% endif %}">{{ v or '·' }}</td>{% endif %}{% endfor %}
       </tr>
       {% endfor %}
       </tbody>

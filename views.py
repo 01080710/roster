@@ -37,9 +37,20 @@ def pivot_to_view(pivot, totals, year, month=None):
             "team": team, "office_code": office, "full_name": name, "employee_id": employee_id,
             "work": days_text(t["work_fraction"]), "leave": days_text(t["leave_fraction"]), "ot": days_text(t["ot_fraction"]),
             "ot_hours": days_text(t["ot_hours"]) if t["ot_hours"] else "",
-            "cells": [(_str_or_none(v), _str_or_none(s)) for v, s in zip(cells, situation.loc[key])],
+            "cells": [_cell(_str_or_none(v), _str_or_none(s)) for v, s in zip(cells, situation.loc[key])],
         })
     return view
+
+
+def _cell(display, situation):
+    """總覽一格 → (顯示文字, situation, parts)。部分請假的格子是兩行（situation 如 'SHIFT+LEAVE'），
+    parts 拆成 [(文字, situation), ...] 讓每行各自上色；其他格子 parts 只有一段。"""
+    lines = display.split("\n") if display else []
+    sits = situation.split("+") if situation else []
+    if len(lines) > 1 and len(lines) == len(sits):
+        return " + ".join(lines), situation, list(zip(lines, sits))
+    # 疊上待審核加班時 situation 會被改成 OT_PENDING：只剩一段，文字照樣保留兩行內容
+    return (" + ".join(lines) or None), situation, [(" + ".join(lines), situation)]
 
 
 def csv_safe(v):
@@ -54,7 +65,7 @@ def pivot_export(view):
     columns = ["team", "office_code", "full_name", "上班", "請假", "加班", "加班時數"] + [
         f"{c['date']} ({c['weekday']})" for c in view["columns"]]
     rows = [[r["team"], r["office_code"], r["full_name"], r["work"], r["leave"], r["ot"], r["ot_hours"]]
-            + [(f"{v}（待審）" if s == "PENDING" else v) or "" for v, s in r["cells"]]
+            + [(f"{v}（待審）" if s == "PENDING" else v) or "" for v, s, _ in r["cells"]]
             for r in view["rows"]]
     return columns, rows
 

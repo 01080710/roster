@@ -155,3 +155,23 @@ def test_preview_api_and_post_all_or_nothing(client, rdb):
     r = client.post("/api/roster", json=body, headers=h)
     assert r.status_code == 400 and len(r.get_json()["results"]) == 4
     assert rdb.get_roster("EMP0003-20261106") is None
+
+
+# ---------------- 總覽：部分請假同時顯示上班與請假 ----------------
+def test_pivot_shows_work_and_partial_leave_in_same_cell(rdb):
+    import views
+    rdb.submit_range("EMP0002", "S0918_FD", D(2026, 11, 2), D(2026, 11, 4))
+    for day, code in ((2, "AL_H1"), (3, "AL_H2")):
+        rid = rdb.create_leave_request("EMP0002", code, D(2026, 11, day), D(2026, 11, day))
+        rdb.approve_leave_request(rid, "EMP0001")
+    rid = rdb.create_leave_request("EMP0002", "AL_FD", D(2026, 11, 4), D(2026, 11, 4))
+    rdb.approve_leave_request(rid, "EMP0001")
+    view = views.pivot_to_view(*rdb.roster_pivot(2026, 11), 2026, 11)
+    row = next(r for r in view["rows"] if r["employee_id"] == "EMP0002")
+    cells = dict(zip([c["date"] for c in view["columns"]], row["cells"]))
+    assert cells["2026-11-02"][2] == [("1st 0.5 AL", "LEAVE"), ("09 > 18", "SHIFT")]     # 上半天請假：請假在前
+    assert cells["2026-11-03"][2] == [("09 > 18", "SHIFT"), ("2nd 0.5 AL", "LEAVE")]
+    assert cells["2026-11-04"][:2] == ("AL", "LEAVE")                                     # 全天假只有一段
+    assert (row["work"], row["leave"]) == ("1", "2")
+    _, rows = views.pivot_export(view)
+    assert "1st 0.5 AL + 09 > 18" in rows[[r["employee_id"] for r in view["rows"]].index("EMP0002")]

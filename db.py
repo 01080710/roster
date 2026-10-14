@@ -1129,12 +1129,19 @@ class RosterDB:
         roster = pd.read_sql_query(
             """SELECT e.team, e.office_code, COALESCE(e.full_name, r.employee_id) AS full_name,
                       r.roster_date, r.employee_id,
-                      COALESCE(s.roster_display, r.shift_code) AS roster_display,
-                      COALESCE(s.category, 'SHIFT') AS situation,
+                      -- 部分請假（當天還有上班）：同一格分兩行顯示原本的班與請假，依時間先後排（H1 請在前面）
+                      CASE WHEN s.category = 'LEAVE' AND r.work_fraction > 0 AND b.roster_display IS NOT NULL THEN
+                             CASE WHEN s.day_portion = 'H1' THEN s.roster_display || char(10) || b.roster_display
+                                  ELSE b.roster_display || char(10) || s.roster_display END
+                           ELSE COALESCE(s.roster_display, r.shift_code) END AS roster_display,
+                      CASE WHEN s.category = 'LEAVE' AND r.work_fraction > 0 AND b.roster_display IS NOT NULL THEN
+                             CASE WHEN s.day_portion = 'H1' THEN 'LEAVE+SHIFT' ELSE 'SHIFT+LEAVE' END
+                           ELSE COALESCE(s.category, 'SHIFT') END AS situation,
                       r.work_fraction, r.leave_fraction
                FROM fact_roster r
                LEFT JOIN dim_employee e ON e.employee_id = r.employee_id
                LEFT JOIN dim_shift_code s ON s.shift_code = r.shift_code
+               LEFT JOIN dim_shift_code b ON b.shift_code = r.base_shift_code
                WHERE r.roster_date BETWEEN ? AND ?
                ORDER BY r.roster_date, r.employee_id""",
             self.conn, params=params,
