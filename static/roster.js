@@ -5,8 +5,8 @@
   const dlg = document.getElementById('detail_dialog');
   const q = sel => dlg.querySelector(`[data-f="${sel}"]`);
   async function openDetail(kind, emp) {
-    const params = new URLSearchParams({kind, year: dlg.dataset.year});
-    if (dlg.dataset.month) params.set('month', dlg.dataset.month);
+    // month 空字串也要帶：沒帶 month 時伺服器會改用當月
+    const params = new URLSearchParams({kind, year: dlg.dataset.year, month: dlg.dataset.month});
     if (emp) params.set('employee_id', emp);
     const res = await fetch(`${dlg.dataset.url}?${params}`);
     const d = await res.json();

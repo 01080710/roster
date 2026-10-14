@@ -13,12 +13,20 @@ from .common import (audit, can, check_leave_shift, check_own_employee, csv_down
 bp = Blueprint("roster", __name__)
 
 
+# def pivot_period():
+#     """總覽的 ?year=&month=；month 空值或不合法 → 全年（None）。"""
+#     year = request.args.get("year", type=int) or dt.date.today().year
+#     month = request.args.get("month", type=int)
+#     return year, month if month in range(1, 13) else None
+
 def pivot_period():
-    """總覽的 ?year=&month=；month 空值或不合法 → 全年（None）。"""
-    year = request.args.get("year", type=int) or dt.date.today().year
+    """總覽的 ?year=&month=；沒帶 month → 當月；month 空值或不合法 → 全年（None）。"""
+    today = dt.date.today()
+    year = request.args.get("year", type=int) or today.year
+    if "month" not in request.args:
+        return year, today.month
     month = request.args.get("month", type=int)
     return year, month if month in range(1, 13) else None
-
 
 @bp.route("/", methods=["GET", "POST"])
 @require("USER_VIEW")

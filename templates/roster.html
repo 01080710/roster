@@ -35,7 +35,7 @@
           <option value="">全年</option>
           {% for m in range(1, 13) %}<option value="{{ m }}" {% if m == pivot.month %}selected{% endif %}>{{ m }} 月</option>{% endfor %}
         </select>
-        <a class="btn secondary" href="{{ url_for('roster.export_roster', year=pivot.year, month=pivot.month) }}">匯出檔案</a>
+        <a class="btn secondary" href="{{ url_for('roster.export_roster', year=pivot.year, month=pivot.month or '') }}">匯出檔案</a>
       </div>
     </form>
     <div class="legend">

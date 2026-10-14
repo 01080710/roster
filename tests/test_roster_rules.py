@@ -40,3 +40,25 @@ def test_short_rest_between_shifts_is_flagged(rdb):
 def test_invalid_ranges_are_rejected(rdb, start, end, message):
     with pytest.raises(ValueError, match=message):
         rdb.submit_range("EMP0002", "S0918_FD", start, end)
+
+
+# ---------------- 總覽的期間（?year=&month=） ----------------
+def test_overview_defaults_to_current_month_but_keeps_full_year_in_links(client):
+    from conftest import login
+    login(client, "EMP0001")
+    today = dt.date.today()
+    year = today.year
+    # 沒帶 month → 當月
+    page = client.get("/").get_data(as_text=True)
+    assert f'data-month="{today.month}"' in page
+    # 選「全年」→ 匯出連結要帶 month=（空值），不然匯出會退回當月
+    page = client.get(f"/?year={year}&month=").get_data(as_text=True)
+    assert 'data-month=""' in page
+    assert f"/export/roster?year={year}&amp;month=" in page
+    assert client.get(f"/export/roster?year={year}&month=").headers["Content-Disposition"].endswith(f'roster_{year}.csv"')
+    assert client.get(f"/export/roster?year={year}").headers["Content-Disposition"].endswith(
+        f'roster_{year}-{today.month:02d}.csv"')
+    # 明細 API：month 空值 → 全年
+    d = client.get(f"/api/roster/detail?kind=work&year={year}&month=").get_json()
+    assert d["ok"]
+
