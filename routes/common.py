@@ -94,6 +94,20 @@ def check_leave_shift(shift_code):
         raise ValueError("請假請到「請假」頁面送出申請")
 
 
+def shift_allowed(emp, sh):
+    """Agent 的上班班別（SHIFT）只能是自己的預設班別，避免誤選其他班別；其他類別與其他角色不限制。"""
+    return emp["role"] != config.AGENT_ROLE or sh["category"] != "SHIFT" or sh["shift_code"] == emp["default_shift_code"]
+
+
+def check_agent_shift(employee_id, shift_code):
+    emp, sh = db().get_employee(employee_id), db().get_shift(shift_code)
+    if emp is None or sh is None or shift_allowed(emp, sh):
+        return
+    if not emp["default_shift_code"]:
+        raise ValueError("還沒有設定預設班別，請主管到「員工」頁面設定")
+    raise ValueError(f"上班班別只能排自己的預設班別 {emp['default_shift_code']}")
+
+
 def can_leave():
     return can("LEAVE_APPLY") or can("LEAVE_APPROVE")
 

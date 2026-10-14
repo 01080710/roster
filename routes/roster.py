@@ -7,8 +7,8 @@ import config
 import forms
 import views
 
-from .common import (audit, can, check_leave_shift, check_own_employee, csv_download, db, log, require,
-                     result_counts)
+from .common import (audit, can, check_agent_shift, check_leave_shift, check_own_employee, csv_download, db, log,
+                     require, result_counts, shift_allowed)
 
 bp = Blueprint("roster", __name__)
 
@@ -76,7 +76,9 @@ def index():
     hidden = {config.CATEGORY_LABEL["OT"]}   # 加班要到加班頁申請，提交班表的下拉不列加班班別
     if not can("LEAVE_APPROVE"):           # 請假改走申請流程，班別下拉不列請假代碼
         hidden.add(config.CATEGORY_LABEL["LEAVE"])
-    shift_groups = [(label, items) for label, items in shift_groups if label not in hidden]
+    shift_groups = [(label, [s for s in items if shift_allowed(g.user, s)])   # Agent 的上班班別只列預設班別
+                    for label, items in shift_groups if label not in hidden]
+    shift_groups = [(label, items) for label, items in shift_groups if items]
 
     if request.method == "POST":
         posted = forms.parse_submit_form(request.form)
@@ -92,6 +94,7 @@ def index():
             if posted["employee_id"] != uid:
                 raise ValueError("只能提交與修改自己的排班")
             check_leave_shift(posted["shift_code"])
+            check_agent_shift(posted["employee_id"], posted["shift_code"])
             if posted["edit_key"]:
                 # 修改彈窗：只改原本那一天，員工與日期不可變
                 if posted["edit_key"] != f"{posted['employee_id']}-{start.isoformat().replace('-', '')}":
@@ -248,6 +251,7 @@ def api_roster():
         p = forms.parse_api_payload(request.get_json(force=True))
         check_own_employee(p["employee_id"])
         check_leave_shift(p["shift_code"])
+        check_agent_shift(p["employee_id"], p["shift_code"])
         results = db().submit_range(p["employee_id"], p["shift_code"], p["start_date"], p["end_date"],
                                     p["leave_approval_status"], p["remarks"],
                                     p["skip_non_working"], allow_update=can("USER_EDIT"))

@@ -97,3 +97,23 @@ def test_init_db_drops_copied_employee_columns(db_path, monkeypatch, tmp_path):
         assert rdb.submit_range("EMP0002", "S0918_FD", D(2026, 11, 2), D(2026, 11, 2))[0]["action"] == "created"
     assert [p.name.startswith("before_roster_drop_employee_columns_") for p in (tmp_path / "backups").iterdir()] == [True]
 
+
+# ---------------- Agent 的上班班別只能是預設班別 ----------------
+def test_agent_shift_dropdown_lists_only_default_shift(client):
+    from conftest import login
+    login(client, "EMP0003")                     # Joanne：Agent，預設班別 S0716_FD
+    page = client.get("/").get_data(as_text=True)
+    assert 'value="S0716_FD"' in page and 'value="S0918_FD"' not in page
+    assert 'value="OFF_FD"' in page and 'value="TB_FD"' in page     # 休息、公務活動照常列出
+    login(client, "EMP0002")                     # Laura：AM，不限制
+    assert 'value="S0918_FD"' in client.get("/").get_data(as_text=True)
+
+
+def test_agent_cannot_submit_other_shift(client):
+    from conftest import bearer
+    h = bearer(client, "EMP0003")
+    body = {"employee_id": "EMP0003", "start_date": "2026-11-02"}
+    r = client.post("/api/roster", json=dict(body, shift_code="S0918_FD"), headers=h)
+    assert r.status_code == 400 and "S0716_FD" in r.get_json()["error"]
+    assert client.post("/api/roster", json=dict(body, shift_code="S0716_FD"), headers=h).status_code == 200
+    assert client.post("/api/roster", json=dict(body, shift_code="OFF_FD"), headers=h).status_code == 200
