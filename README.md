@@ -4,6 +4,8 @@
 
 - 業務流程、資料表與權限的完整說明：[structure.md](structure.md)
 - 所有網址與 API 的說明：啟動後登入（需 `USER_EDIT` 權限），開啟導覽列的「API 文件」（`/apidocs`）
+- 開發案例（問題 → 決策 → 成果）：[docs/case-studies.md](docs/case-studies.md)
+- 各資料夾的說明：[routes/](routes/README.md)、[templates/](templates/README.md)、[static/](static/README.md)、[tests/](tests/README.md)、[docs/](docs/README.md)
 
 ## 目錄
 
@@ -187,13 +189,14 @@ db.py                資料表定義、初始資料、資料庫升級、所有�
 forms.py             表單 / JSON 輸入解析
 views.py             畫面與匯出用的資料轉換
 logger.py            JSON 日誌
-routes/              網址與 API（依業務分：auth、roster、leave、overtime、dim、apidocs；共用的在 common）
-templates/           頁面模板（Jinja）
-static/              CSS 與各頁 JS
-tests/               自動化測試（pytest）
+routes/              網址與 API（依業務分：auth、roster、leave、overtime、dim、apidocs；共用的在 common）→ routes/README.md
+templates/           頁面模板（Jinja）→ templates/README.md
+static/              CSS 與各頁 JS → static/README.md
+tests/               自動化測試（pytest）→ tests/README.md
 requirements.txt     執行需要的套件
 requirements-dev.txt 開發與測試需要的套件
 structure.md         設計說明：業務流程、資料表、權限、備份與日誌
+docs/case-studies.md 開發案例：紅（問題）、藍（決策）、綠（成果）
 docs/journal/        開發日誌（每天一份，/day-end 寫入）
 docs/decisions.md    判斷點：已決定與待決定的事項（/day-start 讀、/day-end 更新）
 .claude/skills/      Claude Code 專案指令：/day-start 開工、/day-end 收工

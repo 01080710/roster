@@ -7,12 +7,10 @@
 import os
 import secrets
 
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
 def _env_bool(name, default):
     return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
 
 
 # 執行環境
